@@ -273,19 +273,13 @@ export class GitHandler {
     this.dispatcher.onRequest('git.abortMerge', (p) => this.abortMerge(p))
     this.dispatcher.onRequest('git.abortRebase', (p) => this.abortRebase(p))
     this.dispatcher.onRequest('git.continueMerge', (p) =>
-      this.sequencerAction(p, ['merge', '--continue'])
+      this.sequencerAction(p, ['merge', '--continue'], 'MERGE_HEAD')
     )
     this.dispatcher.onRequest('git.continueRebase', (p) =>
-      this.sequencerAction(p, ['rebase', '--continue'])
+      this.sequencerAction(p, ['rebase', '--continue'], 'REBASE_HEAD')
     )
     this.dispatcher.onRequest('git.continueCherryPick', (p) =>
-      this.sequencerAction(p, ['cherry-pick', '--continue'])
-    )
-    this.dispatcher.onRequest('git.skipRebase', (p) =>
-      this.sequencerAction(p, ['rebase', '--skip'])
-    )
-    this.dispatcher.onRequest('git.skipCherryPick', (p) =>
-      this.sequencerAction(p, ['cherry-pick', '--skip'])
+      this.sequencerAction(p, ['cherry-pick', '--continue'], 'CHERRY_PICK_HEAD')
     )
     this.dispatcher.onRequest('git.checkout', (p) => this.checkout(p))
     this.dispatcher.onRequest('git.localBranches', (p) => this.localBranches(p))
@@ -676,13 +670,35 @@ export class GitHandler {
     }
   }
 
-  // Why: every subcommand here predates the Git 2.25 baseline (`merge --continue` 2.12,
-  // `cherry-pick --skip` 2.22), so no capability probe or fallback is needed.
-  private async sequencerAction(params: Record<string, unknown>, args: string[]) {
+  private async readSequencerMarkerOid(
+    worktreePath: string,
+    marker: string
+  ): Promise<string | null> {
+    try {
+      const { stdout } = await this.git(['rev-parse', '-q', '--verify', marker], worktreePath)
+      return stdout.trim() || null
+    } catch {
+      return null
+    }
+  }
+
+  // Why: everything here predates the Git 2.25 baseline (`merge --continue` 2.12,
+  // REBASE_HEAD 2.17), so no capability probe or fallback is needed.
+  private async sequencerAction(params: Record<string, unknown>, args: string[], marker: string) {
     this.clearGitMutationReadCaches()
     const worktreePath = params.worktreePath as string
+    const markerBefore = await this.readSequencerMarkerOid(worktreePath, marker)
     try {
       await this.git(args, worktreePath, { suppressEditor: true, terminationBarrier: true })
+    } catch (error) {
+      // Why: `--continue` also exits nonzero when it DID commit the resolution and the
+      // sequencer then stopped on the next commit. The operation's own marker ref moving
+      // (or clearing) is the proof it advanced — unlike HEAD, no concurrent commit in the
+      // worktree can touch it, so a refused step can never masquerade as progress.
+      const markerAfter = await this.readSequencerMarkerOid(worktreePath, marker)
+      if (!markerBefore || markerAfter === markerBefore) {
+        throw error
+      }
     } finally {
       this.clearGitMutationReadCaches()
     }

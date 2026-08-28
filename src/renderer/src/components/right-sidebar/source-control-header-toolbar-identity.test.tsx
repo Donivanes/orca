@@ -186,4 +186,14 @@ describe('SourceControlHeaderToolbar identity during a rebase', () => {
     // mid-rebase commit go away.
     expect(running).toContain('origin/main')
   })
+
+  // A merge keeps HEAD on the real branch, so its counts stay honest — and shown.
+  it('keeps the ahead/behind counter during a merge', () => {
+    const merging = renderToolbar({
+      headDisplay: { kind: 'branch', branchName: 'triage-e2e' },
+      conflictOperation: 'merge'
+    })
+
+    expect(merging).toContain('↑1')
+  })
 })

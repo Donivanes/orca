@@ -1,4 +1,9 @@
 /* eslint-disable max-lines -- Why: centralizes the git RPC protocol surface so local and SSH git behavior stay in one dispatch table. */
+import {
+  gitSequencerAdvanced,
+  gitSequencerContinueStep,
+  isGitSequencerOperation
+} from '../shared/git-sequencer-step'
 import { randomUUID } from 'node:crypto'
 import { execFile, spawn, type ExecFileOptions } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -272,15 +277,7 @@ export class GitHandler {
     this.dispatcher.onRequest('git.bulkUnstage', (p) => this.bulkUnstage(p))
     this.dispatcher.onRequest('git.abortMerge', (p) => this.abortMerge(p))
     this.dispatcher.onRequest('git.abortRebase', (p) => this.abortRebase(p))
-    this.dispatcher.onRequest('git.continueMerge', (p) =>
-      this.sequencerAction(p, ['merge', '--continue'], 'MERGE_HEAD')
-    )
-    this.dispatcher.onRequest('git.continueRebase', (p) =>
-      this.sequencerAction(p, ['rebase', '--continue'], 'REBASE_HEAD')
-    )
-    this.dispatcher.onRequest('git.continueCherryPick', (p) =>
-      this.sequencerAction(p, ['cherry-pick', '--continue'], 'CHERRY_PICK_HEAD')
-    )
+    this.dispatcher.onRequest('git.continueSequencer', (p) => this.continueSequencer(p))
     this.dispatcher.onRequest('git.checkout', (p) => this.checkout(p))
     this.dispatcher.onRequest('git.localBranches', (p) => this.localBranches(p))
     this.dispatcher.onRequest('git.discard', (p) => this.discard(p))
@@ -682,23 +679,27 @@ export class GitHandler {
     }
   }
 
-  // Why: everything here predates the Git 2.25 baseline (`merge --continue` 2.12,
-  // REBASE_HEAD 2.17), so no capability probe or fallback is needed.
-  private async sequencerAction(params: Record<string, unknown>, args: string[], marker: string) {
+  private async continueSequencer(params: Record<string, unknown>) {
+    const operation = params.operation
+    if (!isGitSequencerOperation(operation)) {
+      throw new Error(`Unsupported sequencer operation: ${String(operation)}`)
+    }
     this.clearGitMutationReadCaches()
     const worktreePath = params.worktreePath as string
+    const { args, marker } = gitSequencerContinueStep(operation)
     const markerBefore = await this.readSequencerMarkerOid(worktreePath, marker)
     try {
-      await this.git(args, worktreePath, { suppressEditor: true, terminationBarrier: true })
+      await this.git([...args], worktreePath, { suppressEditor: true, terminationBarrier: true })
     } catch (error) {
-      // Why: `--continue` also exits nonzero when it DID commit the resolution and the
-      // sequencer then stopped on the next commit. The operation's own marker ref moving
-      // (or clearing) is the proof it advanced — unlike HEAD, no concurrent commit in the
-      // worktree can touch it, so a refused step can never masquerade as progress.
       const markerAfter = await this.readSequencerMarkerOid(worktreePath, marker)
-      if (!markerBefore || markerAfter === markerBefore) {
+      if (!gitSequencerAdvanced(markerBefore, markerAfter)) {
         throw error
       }
+      // The sequencer advanced, but git still said something; losing it entirely hides hook failures.
+      console.warn(
+        `[relay/git] \`git ${args.join(' ')}\` advanced ${marker} to ${markerAfter} but exited nonzero:`,
+        error
+      )
     } finally {
       this.clearGitMutationReadCaches()
     }

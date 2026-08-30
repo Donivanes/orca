@@ -29,6 +29,7 @@ import type { IPtyProvider, PtyProcessInfo, PtySpawnOptions, PtySpawnResult } fr
 import {
   ensureNodePtySpawnHelperExecutable,
   validateWorkingDirectory,
+  spawnDirectPty,
   spawnShellWithFallback
 } from './local-pty-utils'
 import { prepareMacosTccLoginShell } from './macos-tcc-login-shell'
@@ -516,7 +517,12 @@ export class LocalPtyProvider implements IPtyProvider {
     // Why hoisted: a fallback shell must drop the primary's launch env, and
     // re-deriving the key names would re-run wrapper generation.
     let primaryLaunchEnvKeys: string[] = []
-    if (wslInfo) {
+    if (args.directExec) {
+      shellPath = args.directExec.executable
+      shellArgs = [...args.directExec.argv]
+      effectiveCwd = cwd
+      validationCwd = cwd
+    } else if (wslInfo) {
       shellPath = 'wsl.exe'
       const resolved = resolveWindowsShellLaunchArgs(shellPath, cwd, defaultCwd)
       shellArgs = resolved.shellArgs
@@ -777,7 +783,7 @@ export class LocalPtyProvider implements IPtyProvider {
       dropInheritedOrcaHistFile(finalEnv)
     }
 
-    if (!wslInfo && process.platform !== 'win32') {
+    if (!args.directExec && !wslInfo && process.platform !== 'win32') {
       // Why after history injection: the wrapper is what repairs a worktree
       // HISTFILE that the system zshrc clobbers, so the decision to wrap has to
       // see whether this spawn actually injected one.
@@ -823,24 +829,35 @@ export class LocalPtyProvider implements IPtyProvider {
     if (concurrentWinner) {
       return concurrentWinner
     }
-    const spawnResult = spawnShellWithFallback({
-      shellPath,
-      shellArgs,
-      cols: args.cols,
-      rows: args.rows,
-      cwd: effectiveCwd,
-      env: finalEnv,
-      termName: finalEnv.TERM,
-      ptySpawn: pty.spawn,
-      getShellReadyConfig: getFallbackShellReadyConfig,
-      launchEnvKeys: primaryLaunchEnvKeys,
-      // Why: on zsh→bash fallback HISTFILE still points to zsh_history; update before spawn so the child inherits it (design doc §8).
-      onBeforeFallbackSpawn: historyResult?.historyDir
-        ? (env, fallbackShell) =>
-            updateHistoryEnvForFallback(env, fallbackShell, historyResult as HistoryInjectionResult)
-        : undefined,
-      windowsFallbackAttempts
-    })
+    const spawnResult = args.directExec
+      ? spawnDirectPty({
+          executable: args.directExec.executable,
+          argv: args.directExec.argv,
+          cols: args.cols,
+          rows: args.rows,
+          cwd: effectiveCwd,
+          env: finalEnv,
+          termName: finalEnv.TERM,
+          ptySpawn: pty.spawn
+        })
+      : spawnShellWithFallback({
+          shellPath,
+          shellArgs,
+          cols: args.cols,
+          rows: args.rows,
+          cwd: effectiveCwd,
+          env: finalEnv,
+          termName: finalEnv.TERM,
+          ptySpawn: pty.spawn,
+          getShellReadyConfig: getFallbackShellReadyConfig,
+          launchEnvKeys: primaryLaunchEnvKeys,
+          // Why: on zsh→bash fallback HISTFILE still points to zsh_history; update before spawn so the child inherits it (design doc §8).
+          onBeforeFallbackSpawn: historyResult?.historyDir
+            ? (env, fallbackShell) =>
+                updateHistoryEnvForFallback(env, fallbackShell, historyResult as HistoryInjectionResult)
+            : undefined,
+          windowsFallbackAttempts
+        })
     args.onPtySpawnCommitted?.()
     shellPath = spawnResult.shellPath
     // Why: a Windows fallback embeds its startup command in argv; honor the winning shell's delivery flag to avoid a double write.
@@ -851,7 +868,7 @@ export class LocalPtyProvider implements IPtyProvider {
       shellReadyLaunch = getFallbackShellReadyConfig(shellPath)
     }
 
-    if (process.platform !== 'win32') {
+    if (!args.directExec && process.platform !== 'win32') {
       finalEnv.SHELL = shellPath
     }
 
@@ -1062,7 +1079,7 @@ export class LocalPtyProvider implements IPtyProvider {
     }
     ptyDisposables.set(id, disposables)
 
-    if (args.command && !startupCommandDeliveredInShellArgs) {
+    if (args.command && !args.directExec && !startupCommandDeliveredInShellArgs) {
       // Why: shells with bracketed paste armed take a multiline startup prompt literally; others use raw submit.
       const spawnedShellName = getSpawnedShellName(shellPath).toLowerCase()
       const bracketedPasteSafe =

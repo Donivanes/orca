@@ -284,6 +284,8 @@ async function callBuild(
  *  host" is answerable per call rather than per suite. */
 function structuredHostStub(): Record<string, ReturnType<typeof vi.fn>> {
   return {
+    admitOrReplayCreateIntent: vi.fn(async () => null),
+    releaseCreateIntentAdmission: vi.fn(),
     attach: vi.fn(async () => ({ ok: true, replayed: false, value: { sessionId: SESSION } })),
     send: vi.fn(async () => ({ ok: true, replayed: false })),
     cancel: vi.fn(async () => ({ ok: true, replayed: false })),

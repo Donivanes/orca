@@ -30,6 +30,33 @@ describe('ensureWorktreeHasInitialTerminal', () => {
     expect(store.queueTabIssueCommandSplit).not.toHaveBeenCalled()
   })
 
+  it('creates a dedicated fallback terminal when setup already owns the first tab', () => {
+    const store = createMockStore({
+      tabsByWorktree: { 'wt-1': [{ id: 'setup-tab' }] },
+      reconcileWorktreeTabModel: vi.fn(() => ({ renderableTabCount: 1 }))
+    })
+
+    ensureWorktreeHasInitialTerminal(
+      store,
+      'wt-1',
+      { command: 'codex', launchAgent: 'codex', launchToken: 'fallback-launch' },
+      undefined,
+      undefined,
+      undefined,
+      { createNewTerminalForStartup: true }
+    )
+
+    expect(store.createTab).toHaveBeenCalledWith('wt-1', undefined, undefined, {
+      pendingActivationSpawn: true,
+      launchAgent: 'codex'
+    })
+    expect(store.queueTabStartupCommand).toHaveBeenCalledWith('tab-1', {
+      command: 'codex',
+      launchAgent: 'codex',
+      launchToken: 'fallback-launch'
+    })
+  })
+
   it('opens new agent workspace terminals in native chat when configured', () => {
     const store = createMockStore({
       settings: {

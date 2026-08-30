@@ -17,6 +17,16 @@ import { ALL_RPC_METHODS } from './index'
 import { STRUCTURED_AGENT_SESSION_METHODS } from './structured-agent-session'
 import { computeAgentSessionPayloadFingerprint } from '../../../../shared/agent-session-mutation-envelope'
 
+const telemetryMocks = vi.hoisted(() => ({
+  track: vi.fn(),
+  getCohortAtEmit: vi.fn(() => ({ nth_repo_added: 2 }))
+}))
+
+vi.mock('../../../telemetry/client', () => ({ track: telemetryMocks.track }))
+vi.mock('../../../telemetry/cohort-classifier', () => ({
+  getCohortAtEmit: telemetryMocks.getCohortAtEmit
+}))
+
 const SESSION = 'session-alpha'
 const FINGERPRINT = 'f'.repeat(64)
 const OPERATION = '1800000000000-00000000000000000000000000000001'
@@ -66,6 +76,18 @@ let runtimeCalls: Record<string, ReturnType<typeof vi.fn>>
 
 function hostStub(): StructuredAgentSessionHost {
   hostCalls = {
+    admitOrReplayCreateIntent: vi.fn(async () => null),
+    settleCreateIntentRefusal: vi.fn(async (_caller, _envelope, refusal) => ({
+      ok: false,
+      refusal
+    })),
+    releaseCreateIntentAdmission: vi.fn(),
+    executionLocationForSession: vi.fn(() => ({
+      executionHostId: 'local',
+      wslDistro: null,
+      workspaceId: 'workspace-1',
+      workspaceKind: 'git-worktree'
+    })),
     attach: vi.fn(async () => ({
       ok: true,
       replayed: false,
@@ -125,7 +147,8 @@ function dispatcher(): RpcDispatcher {
       provider: 'codex',
       agent: 'codex',
       accountHome: { variable: 'CODEX_HOME', path: '/host/.codex' },
-      runtimeKind: 'native'
+      runtimeKind: 'native',
+      ...(params.initialOptions ? { initialOptions: params.initialOptions } : {})
     })),
     publishStructuredAgentSessionTab: vi.fn()
   }
@@ -172,6 +195,7 @@ const STRUCTURED_CLIENT = {
 }
 
 beforeEach(() => {
+  telemetryMocks.track.mockClear()
   setStructuredAgentSessionHost(hostStub())
 })
 
@@ -290,6 +314,188 @@ describe('method routing', () => {
     expect(runtimeCalls.publishStructuredAgentSessionTab).toHaveBeenCalledWith(
       expect.objectContaining({ sessionId: SESSION, activate: true })
     )
+  })
+
+  it('carries a definitive pre-acquisition create refusal as a mutation result', async () => {
+    const worktree = 'id:workspace-remote'
+    const params = {
+      envelope: envelope({
+        expectedRuntimeFence: null,
+        payloadFingerprint: computeAgentSessionPayloadFingerprint({
+          method: 'agentSession.create',
+          sessionId: SESSION,
+          fields: { worktree, agent: 'codex' }
+        })
+      }),
+      worktree,
+      agent: 'codex' as const
+    }
+    const activeDispatcher = dispatcher()
+    runtimeCalls.resolveStructuredAgentSessionCreateIntent.mockResolvedValueOnce({
+      ok: false,
+      refusal: {
+        code: 'structured_agent_session_unsupported',
+        message: 'Structured Codex sessions are unsupported for remote execution.',
+        acquisitionState: 'not-acquired'
+      }
+    })
+
+    const replies: RpcResponse[] = []
+    await activeDispatcher.dispatchStreaming(
+      request('agentSession.create', params),
+      (raw) => replies.push(JSON.parse(raw) as RpcResponse),
+      STRUCTURED_CLIENT
+    )
+    const response = replies[0]
+
+    expect(response).toMatchObject({
+      ok: true,
+      result: {
+        ok: false,
+        refusal: {
+          code: 'structured_agent_session_unsupported',
+          acquisitionState: 'not-acquired'
+        }
+      }
+    })
+    expect(hostCalls.attach).not.toHaveBeenCalled()
+    expect(runtimeCalls.publishStructuredAgentSessionTab).not.toHaveBeenCalled()
+    expect(telemetryMocks.track).not.toHaveBeenCalled()
+  })
+
+  it('replays an acquired create before a changed support verdict can permit fallback', async () => {
+    const worktree = 'id:workspace-1'
+    const fields = { worktree, agent: 'codex' as const }
+    const params = {
+      envelope: envelope({
+        expectedRuntimeFence: null,
+        payloadFingerprint: computeAgentSessionPayloadFingerprint({
+          method: 'agentSession.create',
+          sessionId: SESSION,
+          fields
+        })
+      }),
+      ...fields
+    }
+    const activeDispatcher = dispatcher()
+    hostCalls.admitOrReplayCreateIntent.mockResolvedValueOnce(null).mockResolvedValueOnce({
+      ok: true,
+      replayed: true,
+      fence: 1,
+      cursor: { epoch: 'epoch-a', sequence: 0 },
+      value: {
+        sessionId: SESSION,
+        fence: 1,
+        page: { sessionId: SESSION, direction: 'tail', fence: 1 },
+        unconfirmedClientMessageIds: []
+      }
+    })
+
+    const dispatch = async (): Promise<RpcResponse> => {
+      const replies: RpcResponse[] = []
+      await activeDispatcher.dispatchStreaming(
+        request('agentSession.create', params),
+        (raw) => replies.push(JSON.parse(raw) as RpcResponse),
+        STRUCTURED_CLIENT
+      )
+      return replies[0]!
+    }
+    await expect(dispatch()).resolves.toMatchObject({ ok: true, result: { ok: true } })
+    runtimeCalls.resolveStructuredAgentSessionCreateIntent.mockResolvedValueOnce({
+      ok: false,
+      refusal: {
+        code: 'structured_agent_session_unsupported',
+        message: 'support changed after the first acquisition',
+        acquisitionState: 'not-acquired'
+      }
+    })
+
+    await expect(dispatch()).resolves.toMatchObject({
+      ok: true,
+      result: { ok: true, replayed: true }
+    })
+    expect(runtimeCalls.resolveStructuredAgentSessionCreateIntent).toHaveBeenCalledOnce()
+    expect(hostCalls.attach).toHaveBeenCalledOnce()
+    expect(runtimeCalls.publishStructuredAgentSessionTab).toHaveBeenCalledTimes(2)
+  })
+
+  it('releases create-intent admission when host support resolution throws', async () => {
+    const worktree = 'id:workspace-1'
+    const fields = { worktree, agent: 'codex' as const }
+    const params = {
+      envelope: envelope({
+        expectedRuntimeFence: null,
+        payloadFingerprint: computeAgentSessionPayloadFingerprint({
+          method: 'agentSession.create',
+          sessionId: SESSION,
+          fields
+        })
+      }),
+      ...fields
+    }
+    const activeDispatcher = dispatcher()
+    runtimeCalls.resolveStructuredAgentSessionCreateIntent.mockRejectedValueOnce(
+      new Error('runtime disconnected during support resolution')
+    )
+    const replies: RpcResponse[] = []
+
+    await activeDispatcher.dispatchStreaming(
+      request('agentSession.create', params),
+      (raw) => replies.push(JSON.parse(raw) as RpcResponse),
+      STRUCTURED_CLIENT
+    )
+
+    expect(replies[0]).toMatchObject({ ok: false })
+    expect(hostCalls.releaseCreateIntentAdmission).toHaveBeenCalledWith(
+      expect.anything(),
+      params.envelope
+    )
+    expect(hostCalls.attach).not.toHaveBeenCalled()
+  })
+
+  it('pins initial options and emits launch telemetry only for a new accepted create', async () => {
+    const worktree = 'id:workspace-1'
+    const initialOptions = { model: 'gpt-live', effort: 'high' }
+    const telemetry = {
+      agent_kind: 'codex' as const,
+      launch_source: 'new_workspace_composer' as const,
+      request_kind: 'new' as const
+    }
+    const fields = { worktree, agent: 'codex' as const, initialOptions, telemetry }
+    const params = {
+      envelope: envelope({
+        expectedRuntimeFence: null,
+        payloadFingerprint: computeAgentSessionPayloadFingerprint({
+          method: 'agentSession.create',
+          sessionId: SESSION,
+          fields
+        })
+      }),
+      ...fields
+    }
+
+    await call('agentSession.create', params, STRUCTURED_CLIENT)
+
+    expect(hostCalls.attach.mock.calls[0]?.[1]).toMatchObject({ initialOptions })
+    expect(telemetryMocks.track).toHaveBeenCalledWith('agent_started', {
+      ...telemetry,
+      nth_repo_added: 2
+    })
+    telemetryMocks.track.mockClear()
+    hostCalls.attach.mockImplementationOnce(async () => ({
+      ok: true,
+      replayed: true,
+      fence: 1,
+      cursor: { epoch: 'epoch-a', sequence: 0 },
+      value: {
+        sessionId: SESSION,
+        fence: 1,
+        page: { sessionId: SESSION, direction: 'tail', fence: 1 },
+        unconfirmedClientMessageIds: []
+      }
+    }))
+    await call('agentSession.create', params, STRUCTURED_CLIENT)
+    expect(telemetryMocks.track).not.toHaveBeenCalled()
   })
 
   it('separates create from ensure by the fence the client may declare', async () => {

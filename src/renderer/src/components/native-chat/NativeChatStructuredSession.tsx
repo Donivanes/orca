@@ -21,6 +21,7 @@ import { useNativeChatFileLinkContext } from './use-native-chat-file-link-contex
 import { useStructuredAgentSession } from './use-structured-agent-session'
 import { translate } from '@/i18n/i18n'
 import { NativeChatOrchestrationPausedNotice } from './NativeChatOrchestrationPausedNotice'
+import { useNativeChatLaunchDraftSignal } from './use-native-chat-launch-draft-adoption'
 
 function encodeQuestionAnswer(questionId: string, answer: string): string {
   return `${encodeURIComponent(questionId)}:${encodeURIComponent(answer)}`
@@ -36,6 +37,12 @@ export function NativeChatStructuredSession(props: {
   orchestrationDispatchStatus?: AgentStatusOrchestrationContext['dispatchStatus']
 }): React.JSX.Element {
   const controller = useStructuredAgentSession(props)
+  const launchDraftSignal = useNativeChatLaunchDraftSignal({
+    terminalTabId: props.tabId,
+    agent: props.agent,
+    messages: controller.messages,
+    transcriptLoading: controller.status === 'loading'
+  })
   const [composerError, setComposerError] = useState<string | null>(null)
   const [optionPickerRequest, setOptionPickerRequest] = useState<{
     id: string
@@ -87,7 +94,7 @@ export function NativeChatStructuredSession(props: {
     null
   const structuredTransport = useMemo(
     () => ({
-      send: (text: string, attachments: readonly { id: string; path: string }[]): boolean =>
+      send: (text: string, attachments: readonly { id: string; path: string }[]) =>
         controller.send(
           text,
           attachments.map((attachment) => ({
@@ -226,6 +233,7 @@ export function NativeChatStructuredSession(props: {
           agent={props.agent}
           canSend={!prompt}
           isWorking={controller.isWorking}
+          {...launchDraftSignal}
           onStop={() => {
             if (controller.turnId) {
               void controller.cancel(controller.turnId)

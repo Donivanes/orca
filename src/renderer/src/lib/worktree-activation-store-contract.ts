@@ -63,6 +63,8 @@ export type WorktreeActivationStore = Partial<WorktreeRuntimeOwnerState> & {
 export type InitialTerminalOptions = {
   activateCreatedTabs?: boolean
   backendStartupTerminalSpawned?: boolean
+  /** Create the preserved startup in its own terminal when setup/default tabs already exist. */
+  createNewTerminalForStartup?: boolean
   /** Why: an explicit empty terminal row is a "user closed the last tab" tombstone. Startup
    *  hydration honours it through Terminal.tsx's passive auto-create (which never calls this
    *  function), but opening the workspace on purpose (sidebar, palette, automation "Resume

@@ -53,6 +53,9 @@ function ensureFolderWorkspaceInitialTerminal(
   startup?: WorktreeStartupPayload,
   providesInitialSurface?: boolean
 ): string | null {
+  if (providesInitialSurface === true && !startup) {
+    return null
+  }
   const state = useAppStore.getState()
   const workspaceKey = folderWorkspaceKey(folderWorkspace.id)
   const primaryTabId = ensureWorktreeHasInitialTerminal(
@@ -135,6 +138,7 @@ export function activateAndRevealFolderWorkspace(
   }
   // Why: same ordering as the worktree path — gate first, then resume only when not deferring.
   const shouldGateAgentActivation =
+    opts?.providesInitialSurface !== true &&
     !opts?.startup &&
     (workspaceHasSleepingAgentSessions(state, workspaceKey) ||
       (canInspectAgentActivationInventory() &&
@@ -181,6 +185,8 @@ export function activateAndRevealWorktree(
     revealInSidebar?: boolean
     executionHostId?: ExecutionHostId
     backendStartupTerminalSpawned?: boolean
+    /** Install a preserved fallback startup beside setup/default terminals already seeded. */
+    createNewTerminalForStartup?: boolean
     /** Set by callers that navigate here only to open their own non-terminal surface
      *  (an editor file, a diff). Activation then leaves a closed-last-terminal workspace
      *  empty instead of adding a shell the user never asked for. Caveat: on a
@@ -242,6 +248,7 @@ export function activateAndRevealWorktree(
   // agent inventory hydrates asynchronously too, so an empty tab model can otherwise authorize a
   // fallback terminal beside a chat that is about to appear.
   const shouldGateAgentActivation =
+    opts?.providesInitialSurface !== true &&
     !hasActivationWork &&
     (workspaceHasSleepingAgentSessions(postActivationState, worktreeId) ||
       (canInspectAgentActivationInventory() &&
@@ -266,18 +273,21 @@ export function activateAndRevealWorktree(
   // 4. Ensure a focusable surface exists for externally-created worktrees
   const primaryTabId = shouldGateAgentActivation
     ? null
-    : ensureWorktreeHasInitialTerminal(
-        useAppStore.getState(),
-        worktreeId,
-        opts?.startup,
-        opts?.setup,
-        opts?.issueCommand,
-        opts?.defaultTabs,
-        {
-          ...(opts?.backendStartupTerminalSpawned ? { backendStartupTerminalSpawned: true } : {}),
-          reseedEmptiedWorkspace: opts?.providesInitialSurface !== true
-        }
-      )
+    : opts?.providesInitialSurface === true && !hasActivationWork
+      ? null
+      : ensureWorktreeHasInitialTerminal(
+          useAppStore.getState(),
+          worktreeId,
+          opts?.startup,
+          opts?.setup,
+          opts?.issueCommand,
+          opts?.defaultTabs,
+          {
+            ...(opts?.backendStartupTerminalSpawned ? { backendStartupTerminalSpawned: true } : {}),
+            ...(opts?.createNewTerminalForStartup ? { createNewTerminalForStartup: true } : {}),
+            reseedEmptiedWorkspace: opts?.providesInitialSurface !== true
+          }
+        )
   if (primaryTabId && opts?.initialCwd) {
     useAppStore.getState().queueTabInitialCwd(primaryTabId, opts.initialCwd)
   }

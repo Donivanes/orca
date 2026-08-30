@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   openModalFallback: vi.fn(),
   resolvePrBase: vi.fn(),
   getConnectionId: vi.fn(),
+  startStructuredCodexLaunch: vi.fn(),
   store: {} as Record<string, unknown> & {
     ensureDetectedAgents: ReturnType<typeof vi.fn>
     ensureRemoteDetectedAgents: ReturnType<typeof vi.fn>
@@ -57,6 +58,17 @@ vi.mock('@/lib/ensure-hooks-confirmed', () => ({
 
 vi.mock('@/lib/connection-context', () => ({
   getConnectionId: mocks.getConnectionId
+}))
+
+vi.mock('@/lib/structured-agent-session-launch', () => ({
+  startStructuredCodexLaunch: mocks.startStructuredCodexLaunch
+}))
+vi.mock('@/runtime/local-runtime-capabilities', () => ({
+  readLocalRuntimeCapabilities: () => [
+    'agent-session.structured.v1',
+    'agent-session.structured.codex.v1',
+    'agent-session.structured.initial-options.v1'
+  ]
 }))
 
 vi.mock('@/runtime/runtime-hooks-client', () => ({
@@ -120,6 +132,35 @@ import { launchWorkItemDirect } from './launch-work-item-direct'
 import { pasteDraftWhenAgentReady } from '@/lib/agent-paste-draft'
 import { buildAgentDraftLaunchPlan, buildAgentStartupPlan } from '@/lib/tui-agent-startup'
 import { pickTuiAgent } from '../../../shared/tui-agent-selection'
+import { StructuredAgentSessionCreateRefusalError } from '@/lib/launch-structured-codex-session'
+import type {
+  StructuredCodexLaunchReceipt,
+  StructuredCodexLaunchResult
+} from '@/lib/structured-agent-session-launch'
+
+function structuredLaunchResult(
+  sessionId: string,
+  launchResult: Promise<StructuredCodexLaunchReceipt>
+): StructuredCodexLaunchResult {
+  let fallbackResult: Promise<boolean> | null = null
+  return {
+    sessionId,
+    launchResult,
+    claimDefinitiveRefusalFallback: (fallback) => {
+      fallbackResult ??= launchResult.then(
+        () => false,
+        async (error) => {
+          if (!(error instanceof StructuredAgentSessionCreateRefusalError)) {
+            return false
+          }
+          await fallback()
+          return true
+        }
+      )
+      return fallbackResult
+    }
+  }
+}
 
 const mockApi = {
   worktrees: {
@@ -160,6 +201,9 @@ describe('launchWorkItemDirect', () => {
     mocks.updateWorktreeMeta.mockResolvedValue(undefined)
     mocks.activateAndRevealWorktree.mockReturnValue({ primaryTabId: 'tab-1' })
     mocks.pasteDraftWhenAgentReady.mockResolvedValue(true)
+    mocks.startStructuredCodexLaunch.mockReturnValue(
+      structuredLaunchResult('session-1', Promise.resolve({ sessionId: 'session-1', fence: 1 }))
+    )
     mocks.store = {
       repos: [
         {
@@ -733,59 +777,6 @@ describe('launchWorkItemDirect', () => {
     const activationOptions = mocks.activateAndRevealWorktree.mock.calls.at(-1)?.[1]
     expect(activationOptions.startup.command).toContain(
       `command test -n "$fish_pid" && set --erase -g ORCA_PI_PREFILL; command test -z "$fish_pid" && unset ORCA_PI_PREFILL; true`
-    )
-  })
-
-  it('plans direct local Windows-path launches with POSIX startup for WSL project runtime', async () => {
-    mocks.store.repos = [
-      {
-        id: 'repo-1',
-        path: 'C:\\Users\\alice\\repo',
-        displayName: 'Repo',
-        addedAt: 1
-      }
-    ]
-    mocks.store.projects = [
-      {
-        id: 'repo-1',
-        displayName: 'Repo',
-        badgeColor: '#000000',
-        sourceRepoIds: ['repo-1'],
-        createdAt: 1,
-        updatedAt: 1,
-        localWindowsRuntimePreference: { kind: 'wsl', distro: 'Ubuntu' }
-      }
-    ]
-    mocks.store.createWorktree.mockResolvedValue({
-      worktree: {
-        id: 'repo-1::C:\\Users\\alice\\repo-worktree',
-        path: 'C:\\Users\\alice\\repo-worktree'
-      }
-    })
-    const { launchWorkItemDirect } = await import('./launch-work-item-direct')
-
-    await expect(
-      launchWorkItemDirect({
-        item: {
-          title: 'Fix failing checks',
-          url: 'https://github.com/acme/repo/pull/1',
-          type: 'issue',
-          number: 1,
-          pasteContent: 'Fix the failing checks.'
-        },
-        repoId: 'repo-1',
-        openModalFallback: mocks.openModalFallback,
-        launchSource: 'task_page',
-        agentOverride: 'codex',
-        promptDelivery: 'submit-after-ready'
-      })
-    ).resolves.toBe(true)
-
-    expect(buildAgentStartupPlan).toHaveBeenCalledWith(
-      expect.objectContaining({
-        agent: 'codex',
-        platform: 'linux'
-      })
     )
   })
 })

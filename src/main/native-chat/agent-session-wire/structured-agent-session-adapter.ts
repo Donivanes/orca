@@ -70,6 +70,8 @@ export type StructuredAgentSessionAcquireInput = {
   fence: number
   spawnToken: string
   options?: Readonly<Record<string, string>>
+  /** Validate create-time options before publishing the acquisition. */
+  validateOptions?: boolean
   /** Provider events may begin before acquisition returns. */
   events?: StructuredAgentSessionEventSink
 }

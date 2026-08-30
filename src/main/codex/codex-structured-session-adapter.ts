@@ -18,9 +18,7 @@ import { createCodexJournalTranslator } from './codex-structured-journal-transla
 import { openCodexAppServerConnection } from './codex-app-server-connection'
 import { codexProcessIdentity, codexProviderHandleLink } from './codex-structured-owner-identity'
 import { buildCodexStructuredChildEnvironment } from './codex-structured-child-environment'
-import { answerCodexPrompt } from './codex-structured-prompt-replies'
 import { openCodexThread } from './codex-structured-thread-open'
-import { dispatchCodexTurn, isCodexTurnOptionKey } from './codex-structured-turn-start'
 import { supportsCodexStructuredLocation } from './codex-structured-location-support'
 import {
   closeAllCodexSessions,
@@ -29,10 +27,9 @@ import {
   handleCodexSessionExit
 } from './codex-structured-session-close'
 import {
-  applyCodexStructuredSessionOption,
-  readLiveCodexSessionOptions,
   reportedCodexThreadOptions,
-  restoredCodexSessionOptions
+  restoredCodexSessionOptions,
+  validateCodexStructuredSessionInitialOptions
 } from './codex-structured-session-options'
 import {
   CodexAcquisitionRegistry,
@@ -47,6 +44,15 @@ import {
   deliverCodexUnhandledFrame
 } from './codex-structured-provider-events'
 import { CodexStructuredTurnCancellation } from './codex-structured-turn-cancellation'
+import {
+  answerCodexSessionPrompt,
+  bindCodexPromptItemId,
+  cancelCodexTurn,
+  codexSessionHistoryFilePath,
+  dispatchCodexSession,
+  readCodexSessionOptions,
+  setCodexSessionOption
+} from './codex-structured-session-adapter-operations'
 
 export type {
   CodexStructuredLaunch,
@@ -161,8 +167,6 @@ export class CodexStructuredSessionAdapter implements StructuredAgentSessionAdap
       if (connection.closed) {
         throw new Error(`codex app-server for session ${sessionId} exited while being acquired`)
       }
-      this.acquisitions.assertCurrent(sessionId, attempt)
-      this.acquisitions.deleteIfCurrent(sessionId, attempt)
       const session: CodexSession = {
         connection,
         ended: false,
@@ -174,8 +178,20 @@ export class CodexStructuredSessionAdapter implements StructuredAgentSessionAdap
         turnIdWaiters: [],
         translator
       }
-      this.turnCancellation.register(session)
-      this.sessions.set(sessionId, session)
+      if (input.validateOptions && input.options) {
+        await validateCodexStructuredSessionInitialOptions(
+          session,
+          input.options,
+          this.deps.requestTimeoutMs
+        )
+      }
+      if (connection.closed) {
+        throw new Error(`codex app-server for session ${sessionId} exited while being acquired`)
+      }
+      this.acquisitions.publishIfCurrent(sessionId, attempt, () => {
+        this.turnCancellation.register(session)
+        this.sessions.set(sessionId, session)
+      })
       for (const event of acquisition.drain()) {
         event()
       }
@@ -249,61 +265,44 @@ export class CodexStructuredSessionAdapter implements StructuredAgentSessionAdap
   }
 
   bindPromptItemId = (sessionId: string, journalItemId: string, promptKey: string): void =>
-    this.sessions
-      .get(sessionId)
-      ?.prompts.bindJournalItemId(journalItemId, this.session(sessionId).threadId, promptKey)
+    bindCodexPromptItemId(this.sessions, sessionId, journalItemId, promptKey)
 
-  async dispatch(input: {
+  dispatch = async (input: {
     sessionId: string
     clientMessageId: string
     body: AgentJournalMessageItem
     fence: number
-  }): Promise<AgentSessionDispatchOutcome> {
-    const session = this.session(input.sessionId)
-    await this.turnCancellation.captureBaseline(session)
-    return dispatchCodexTurn(session, input, this.deps.requestTimeoutMs)
-  }
+  }): Promise<AgentSessionDispatchOutcome> =>
+    dispatchCodexSession(this.sessions, this.turnCancellation, input, this.deps.requestTimeoutMs)
 
-  async cancelTurn(input: {
+  cancelTurn = async (input: {
     sessionId: string
     turnId: string
     fence: number
-  }): Promise<{ cancelled: boolean }> {
-    const session = this.session(input.sessionId)
-    return this.turnCancellation.cancel(session, input.turnId)
-  }
+  }): Promise<{ cancelled: boolean }> =>
+    cancelCodexTurn(this.sessions, this.turnCancellation, input)
 
-  async answerPrompt(input: {
+  answerPrompt = async (input: {
     sessionId: string
     itemId: string
     kind: 'approval' | 'question'
     optionId: string
     fence: number
-  }): Promise<void> {
-    const session = this.session(input.sessionId)
-    answerCodexPrompt(session.prompts, session.connection, input.itemId, input.optionId)
+  }): Promise<void> => {
+    answerCodexSessionPrompt(this.sessions, input)
   }
 
-  async setOption(
+  setOption = async (
     input: StructuredAgentSessionSetOptionInput
-  ): Promise<Readonly<Record<string, string>>> {
-    if (!isCodexTurnOptionKey(input.key)) {
-      throw new Error(`codex app-server has no thread option named ${input.key}`)
-    }
-    return applyCodexStructuredSessionOption(
-      this.session(input.sessionId),
-      input.key,
-      input.value,
-      this.deps.requestTimeoutMs
-    )
-  }
+  ): Promise<Readonly<Record<string, string>>> =>
+    setCodexSessionOption(this.sessions, input, this.deps.requestTimeoutMs)
 
   readOptions = (input: { sessionId: string; fence: number }) =>
-    readLiveCodexSessionOptions(this.session(input.sessionId), this.deps.requestTimeoutMs)
+    readCodexSessionOptions(this.sessions, input.sessionId, this.deps.requestTimeoutMs)
 
   historyFilePath = async (input: {
     identity: AgentSessionJournalIdentity
-  }): Promise<string | null> => this.sessions.get(input.identity.sessionId)?.historyPath ?? null
+  }): Promise<string | null> => codexSessionHistoryFilePath(this.sessions, input.identity)
 
   closeSession = (sessionId: string): Promise<boolean> =>
     closeCodexSession(sessionId, this.sessions, this.acquisitions, this.deps.onEvent)
@@ -314,12 +313,4 @@ export class CodexStructuredSessionAdapter implements StructuredAgentSessionAdap
     )
   releaseAcquisition = (input: { sessionId: string }): Promise<boolean> =>
     this.closeSession(input.sessionId)
-
-  private session(sessionId: string): CodexSession {
-    const session = this.sessions.get(sessionId)
-    if (!session || session.ended) {
-      throw new Error(`no live codex app-server for session ${sessionId}`)
-    }
-    return session
-  }
 }

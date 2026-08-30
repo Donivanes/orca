@@ -53,6 +53,7 @@ describe('activateStructuredAgentSessionTab', () => {
       agentSessionAgent: 'codex'
     } satisfies Tab
     mocks.state = {
+      activeWorktreeId: 'wt-1',
       unifiedTabsByWorktree: { 'wt-1': [tab] },
       focusGroup: mocks.focusGroup,
       activateTab: mocks.activateTab,
@@ -85,5 +86,17 @@ describe('activateStructuredAgentSessionTab', () => {
       'session.tabs.activate',
       { worktree: 'id:wt-1', tabId: 'agent-session:session-1' }
     )
+  })
+
+  it('records hidden-workspace focus without changing the visible workspace type', () => {
+    mocks.state.activeWorktreeId = 'wt-other'
+
+    expect(
+      activateStructuredAgentSessionTab({ worktreeId: 'wt-1', tabId: 'structured-tab-1' })
+    ).toBe(true)
+
+    expect(mocks.focusGroup).toHaveBeenCalledWith('wt-1', 'group-1')
+    expect(mocks.activateTab).toHaveBeenCalledWith('structured-tab-1', { worktreeId: 'wt-1' })
+    expect(mocks.setActiveTabType).not.toHaveBeenCalled()
   })
 })

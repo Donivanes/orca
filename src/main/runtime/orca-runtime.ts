@@ -88,6 +88,7 @@ import {
 } from './structured-agent-session-runtime'
 import { getStructuredAgentSessionHost } from '../native-chat/agent-session-wire/structured-agent-session-registry'
 import type { AgentSessionAttachParams } from '../native-chat/agent-session-wire/structured-agent-session-attach'
+import type { AgentSessionWireRefusal } from '../../shared/agent-session-wire'
 import {
   StructuredTuiLaunchCleanupError,
   type StructuredAgentSessionHandoffTransport,
@@ -12249,7 +12250,8 @@ export class OrcaRuntimeService {
     envelope: { sessionId: string; clientOperationId: string }
     worktree: string
     agent: 'codex'
-  }): Promise<AgentSessionAttachParams> {
+    initialOptions?: { model: string; effort?: string }
+  }): Promise<AgentSessionAttachParams | { ok: false; refusal: AgentSessionWireRefusal }> {
     return this.resolveStructuredAgentSessionIntent(input, async ({ workspacePath, launchEnv }) => {
       // A create has no process yet, so the current selection is what it must follow.
       const preparedHome = await this.prepareCodexStructuredLaunchFn?.({ workspacePath, launchEnv })
@@ -12267,15 +12269,24 @@ export class OrcaRuntimeService {
       envelope: { sessionId: string; clientOperationId: string }
       worktree: string
       agent: 'codex'
+      initialOptions?: { model: string; effort?: string }
     },
     resolveAccountHomePath: (context: {
       workspacePath: string
       launchEnv: NodeJS.ProcessEnv
     }) => string | Promise<string>
-  ): Promise<AgentSessionAttachParams> {
+  ): Promise<AgentSessionAttachParams | { ok: false; refusal: AgentSessionWireRefusal }> {
     const support = await this.getStructuredAgentSessionCreateSupport(input.worktree, input.agent)
     if (!support.supported) {
-      throw new Error('structured_agent_session_unsupported')
+      const reason = support.reason ?? 'agent'
+      return {
+        ok: false,
+        refusal: {
+          code: 'structured_agent_session_unsupported',
+          message: `Structured Codex sessions are unsupported for ${reason} execution.`,
+          acquisitionState: 'not-acquired'
+        }
+      }
     }
     const settings = this.requireStore().getSettings()
     const launchEnv = resolveTuiAgentLaunchEnv(input.agent, settings.agentDefaultEnv)
@@ -12295,7 +12306,8 @@ export class OrcaRuntimeService {
         variable: 'CODEX_HOME',
         path: await resolveAccountHomePath({ workspacePath, launchEnv })
       },
-      runtimeKind: 'native'
+      runtimeKind: 'native',
+      ...(input.initialOptions ? { initialOptions: input.initialOptions } : {})
     }
   }
 

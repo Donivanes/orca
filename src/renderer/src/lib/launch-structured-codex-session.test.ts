@@ -3,7 +3,8 @@ import { structuredAgentSessionPayloadFingerprint } from '../../../shared/struct
 import { callStructuredAgentSession } from '@/runtime/structured-agent-session-client'
 import {
   createStructuredCodexSessionLaunchIntent,
-  launchStructuredCodexSession
+  launchStructuredCodexSession,
+  StructuredAgentSessionCreateRefusalError
 } from './launch-structured-codex-session'
 
 vi.mock('@/runtime/structured-agent-session-client', () => ({
@@ -45,14 +46,14 @@ describe('structured Codex launch', () => {
     }))
 
     const intent = createStructuredCodexSessionLaunchIntent('workspace-1')
-    const sessionId = await launchStructuredCodexSession(intent)
+    const receipt = await launchStructuredCodexSession(intent)
     const params = vi.mocked(callStructuredAgentSession).mock.calls[0]?.[2] as {
       envelope: { sessionId: string; payloadFingerprint: string }
       worktree: string
       agent: 'codex'
     }
 
-    expect(sessionId).toMatch(/^codex_[A-Za-z0-9_]{36}$/)
+    expect(receipt.sessionId).toMatch(/^codex_[A-Za-z0-9_]{36}$/)
     expect(callStructuredAgentSession).toHaveBeenCalledWith(
       { kind: 'local' },
       'agentSession.create',
@@ -80,5 +81,37 @@ describe('structured Codex launch', () => {
     expect(first).toBe(intent.params)
     expect(second).toBe(first)
     expect(intent.params.envelope.clientOperationId).toMatch(/^\d{13}-[0-9a-f]{32}$/)
+  })
+
+  it('classifies a typed pre-acquisition host verdict as a definitive refusal', async () => {
+    vi.mocked(callStructuredAgentSession).mockResolvedValue({
+      ok: false,
+      refusal: {
+        code: 'structured_agent_session_unsupported',
+        message: 'Structured Codex sessions are unsupported on remote execution.',
+        acquisitionState: 'not-acquired'
+      }
+    })
+    const intent = createStructuredCodexSessionLaunchIntent('workspace-refused')
+
+    await expect(launchStructuredCodexSession(intent)).rejects.toBeInstanceOf(
+      StructuredAgentSessionCreateRefusalError
+    )
+    expect(callStructuredAgentSession).toHaveBeenCalledOnce()
+  })
+
+  it('keeps an untyped old-host refusal ambiguous to prevent duplicate execution', async () => {
+    vi.mocked(callStructuredAgentSession).mockResolvedValue({
+      ok: false,
+      refusal: {
+        code: 'structured_agent_session_unsupported',
+        message: 'structured_agent_session_unsupported'
+      }
+    })
+    const intent = createStructuredCodexSessionLaunchIntent('workspace-old-host')
+
+    await expect(launchStructuredCodexSession(intent)).rejects.not.toBeInstanceOf(
+      StructuredAgentSessionCreateRefusalError
+    )
   })
 })

@@ -13,7 +13,10 @@ export type NativeChatOptionPickerRequest = {
 }
 
 export type NativeChatStructuredComposerTransport = {
-  send: (text: string, attachments: readonly NativeChatComposerImageAttachment[]) => boolean
+  send: (
+    text: string,
+    attachments: readonly NativeChatComposerImageAttachment[]
+  ) => Promise<boolean>
   dispatchCommand: (text: string) => Promise<StructuredAgentSessionCommandOutcome>
   optionsSurface: SessionOptionsSurface
   optionSnapshot: SessionOptionDescriptor[]

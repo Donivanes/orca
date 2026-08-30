@@ -42,6 +42,9 @@ describe('structured agent-session create intent', () => {
       worktree: 'id:workspace-1',
       agent: 'codex'
     })
+    if ('ok' in intent) {
+      throw new Error('expected a supported create intent')
+    }
 
     expect(prepareCodexStructuredLaunch).toHaveBeenCalledWith({
       workspacePath: '/repos/workspace-1',
@@ -52,4 +55,30 @@ describe('structured agent-session create intent', () => {
       path: '/accounts/selected/home'
     })
   })
+
+  it.each(['agent', 'remote', 'wsl'] as const)(
+    'returns a typed pre-acquisition refusal when %s support changes before create',
+    async (reason) => {
+      const runtime = new OrcaRuntimeService({ getSettings: () => ({}) } as never)
+      vi.spyOn(runtime, 'getStructuredAgentSessionCreateSupport').mockResolvedValue({
+        supported: false,
+        reason
+      })
+
+      const resolution = await runtime.resolveStructuredAgentSessionCreateIntent({
+        envelope: { sessionId: 'session-1', clientOperationId: 'operation-1' },
+        worktree: 'id:workspace-1',
+        agent: 'codex'
+      })
+
+      expect(resolution).toEqual({
+        ok: false,
+        refusal: {
+          code: 'structured_agent_session_unsupported',
+          message: expect.stringContaining(reason),
+          acquisitionState: 'not-acquired'
+        }
+      })
+    }
+  )
 })

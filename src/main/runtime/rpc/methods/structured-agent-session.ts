@@ -19,6 +19,8 @@ import {
   supportsStructuredSessions
 } from './structured-agent-session-gate'
 import { STRUCTURED_AGENT_SESSION_HOLD_METHODS } from './structured-agent-session-hold'
+import { track } from '../../../telemetry/client'
+import { getCohortAtEmit } from '../../../telemetry/cohort-classifier'
 import {
   AttachParams,
   CancelParams,
@@ -66,13 +68,45 @@ export const STRUCTURED_AGENT_SESSION_METHODS: RpcAnyMethod[] = [
         const intentFingerprint = computeAgentSessionPayloadFingerprint({
           method: 'agentSession.create',
           sessionId: params.envelope.sessionId,
-          fields: { worktree: params.worktree, agent: params.agent }
+          fields: {
+            worktree: params.worktree,
+            agent: params.agent,
+            ...(params.initialOptions ? { initialOptions: params.initialOptions } : {}),
+            ...(params.telemetry ? { telemetry: params.telemetry } : {})
+          }
         })
         const conflict = agentSessionFingerprintConflict(params.envelope, intentFingerprint)
         if (conflict) {
           return { ok: false, refusal: conflict }
         }
-        const resolved = await ctx.runtime.resolveStructuredAgentSessionCreateIntent(params)
+        await ensureHostInstalled(ctx)
+        const host = requireHost(ctx)
+        const caller = callerFor(ctx)
+        const replayed = await host.admitOrReplayCreateIntent(caller, params.envelope)
+        if (replayed) {
+          if (replayed.ok) {
+            const location = host.executionLocationForSession(replayed.value.sessionId)
+            if (location) {
+              ctx.runtime.publishStructuredAgentSessionTab({
+                workspaceId: location.workspaceId,
+                sessionId: replayed.value.sessionId,
+                agent: 'codex',
+                activate: true
+              })
+            }
+          }
+          return replayed
+        }
+        let resolved
+        try {
+          resolved = await ctx.runtime.resolveStructuredAgentSessionCreateIntent(params)
+        } catch (error) {
+          host.releaseCreateIntentAdmission(caller, params.envelope)
+          throw error
+        }
+        if ('ok' in resolved) {
+          return host.settleCreateIntentRefusal(caller, params.envelope, resolved.refusal)
+        }
         const hostFingerprint = computeAgentSessionPayloadFingerprint({
           method: 'agentSession.attach',
           sessionId: params.envelope.sessionId,
@@ -82,14 +116,20 @@ export const STRUCTURED_AGENT_SESSION_METHODS: RpcAnyMethod[] = [
             agent: resolved.agent,
             accountHome: resolved.accountHome,
             runtimeKind: resolved.runtimeKind,
+            ...(resolved.initialOptions ? { initialOptions: resolved.initialOptions } : {}),
             expectedRuntimeFence: null
           }
         })
-        await ensureHostInstalled(ctx)
-        const result = await requireHost(ctx).attach(callerFor(ctx), {
-          ...resolved,
-          envelope: { ...params.envelope, payloadFingerprint: hostFingerprint }
-        })
+        let result
+        try {
+          result = await host.attach(caller, {
+            ...resolved,
+            envelope: { ...params.envelope, payloadFingerprint: hostFingerprint },
+            operationFingerprint: intentFingerprint
+          })
+        } finally {
+          host.releaseCreateIntentAdmission(caller, params.envelope)
+        }
         if (result.ok && resolved.agent === 'codex') {
           await ctx.runtime.publishStructuredAgentSessionTab({
             workspaceId: resolved.location.workspaceId,
@@ -97,6 +137,9 @@ export const STRUCTURED_AGENT_SESSION_METHODS: RpcAnyMethod[] = [
             agent: 'codex',
             activate: true
           })
+          if (!result.replayed && params.telemetry) {
+            track('agent_started', { ...params.telemetry, ...getCohortAtEmit() })
+          }
         }
         return result
       }

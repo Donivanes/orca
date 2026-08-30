@@ -13,6 +13,13 @@ import type { OnboardingState } from '../../../shared/onboarding-state-types'
 import type { TuiAgent } from '../../../shared/tui-agent'
 import { resolveInitialNativeChatSessionOptions } from '@/components/native-chat/native-chat-launch-session-options'
 import type { SessionOptionValue } from '../../../shared/native-chat-session-options'
+import {
+  hasExplicitTuiLaunchCustomization,
+  normalizeStructuredCodexInitialOptions,
+  resolveAgentLaunchRoute,
+  type AgentLaunchRoute
+} from '@/lib/agent-launch-routing'
+import { readLocalRuntimeCapabilities } from '@/runtime/local-runtime-capabilities'
 
 export type OnboardingFolderAgentStartup = {
   command: string
@@ -101,4 +108,53 @@ export function buildDismissedOnboardingFolderAgentStartup(
     return undefined
   }
   return buildOnboardingFolderAgentStartup(settings, nativeChatTranscriptIsLocalReadable)
+}
+
+export function resolveDismissedOnboardingFolderAgentLaunch(args: {
+  settings: GlobalSettings | null
+  onboarding: OnboardingState | null
+  hasExistingProject: boolean
+  executionHostId: string
+  nativeChatTranscriptIsLocalReadable?: boolean
+}): {
+  agent: TuiAgent | null
+  route: AgentLaunchRoute
+  startup?: OnboardingFolderAgentStartup
+  structuredInitialOptions?: { model: string; effort?: string }
+  structuredTelemetry?: AgentStartedTelemetry
+  fallbackStartup?: OnboardingFolderAgentStartup
+} {
+  const startup = buildDismissedOnboardingFolderAgentStartup(
+    args.settings,
+    args.onboarding,
+    args.hasExistingProject,
+    args.nativeChatTranscriptIsLocalReadable
+  )
+  const agent = startup?.launchAgent ?? null
+  if (!startup || !agent) {
+    return { agent: null, route: 'terminal-tui' }
+  }
+  const route = resolveAgentLaunchRoute({
+    agent,
+    settings: args.settings,
+    executionHostId: args.executionHostId,
+    platform: getClientPlatform(),
+    hostCapabilities: readLocalRuntimeCapabilities(),
+    workspaceKind: 'folder',
+    nativeChatTranscriptIsLocalReadable: args.nativeChatTranscriptIsLocalReadable,
+    requiresTuiLaunchCustomization: hasExplicitTuiLaunchCustomization(args.settings, agent),
+    initialSessionOptions: normalizeStructuredCodexInitialOptions(startup.sessionOptions)
+  })
+  const structuredInitialOptions = normalizeStructuredCodexInitialOptions(startup.sessionOptions)
+  return {
+    agent,
+    route,
+    ...(route === 'structured-native-chat'
+      ? {
+          ...(structuredInitialOptions ? { structuredInitialOptions } : {}),
+          structuredTelemetry: startup.telemetry,
+          fallbackStartup: startup
+        }
+      : { startup })
+  }
 }

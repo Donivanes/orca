@@ -5,7 +5,8 @@ import {
   applyCodexStructuredSessionOption,
   readCodexStructuredSessionOptions,
   reportedCodexThreadOptions,
-  restoredCodexSessionOptions
+  restoredCodexSessionOptions,
+  validateCodexStructuredSessionInitialOptions
 } from './codex-structured-session-options'
 import type { CodexSession } from './codex-structured-session-state'
 
@@ -167,5 +168,38 @@ describe('structured Codex session options', () => {
     await expect(
       applyCodexStructuredSessionOption(session, 'effort', 'high', undefined)
     ).rejects.toThrow('does not support high')
+  })
+
+  it('validates create-time model and effort before the first turn', async () => {
+    const session = optionSession(
+      vi.fn(async () => ({
+        data: [
+          {
+            model: 'gpt-entitled',
+            supportedReasoningEfforts: [{ reasoningEffort: 'high' }]
+          }
+        ],
+        nextCursor: null
+      }))
+    )
+
+    await expect(
+      validateCodexStructuredSessionInitialOptions(
+        session,
+        { model: 'gpt-entitled', effort: 'high' },
+        undefined
+      )
+    ).resolves.toBeUndefined()
+    expect(Object.fromEntries(session.options)).toEqual({
+      model: 'gpt-entitled',
+      effort: 'high'
+    })
+    await expect(
+      validateCodexStructuredSessionInitialOptions(
+        session,
+        { model: 'not-entitled', effort: 'high' },
+        undefined
+      )
+    ).rejects.toThrow('does not offer model not-entitled')
   })
 })

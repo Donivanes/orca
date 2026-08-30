@@ -134,4 +134,18 @@ describe('quick composer creation request', () => {
     expect(request).not.toHaveProperty('linkedGitLabMR')
     expect(request).not.toHaveProperty('linkedGitLabIssue')
   })
+
+  it('serializes the centralized launch route for background creation and retry', () => {
+    const request = buildQuickCreationRequest(
+      createInput({
+        agent: 'codex',
+        agentLaunchRoute: 'structured-native-chat',
+        structuredInitialOptions: { model: 'gpt-live', effort: 'high' },
+        quickPrompt: 'Fix quick creation'
+      })
+    )
+
+    expect(request.agentLaunchRoute).toBe('structured-native-chat')
+    expect(request.structuredInitialOptions).toEqual({ model: 'gpt-live', effort: 'high' })
+  })
 })

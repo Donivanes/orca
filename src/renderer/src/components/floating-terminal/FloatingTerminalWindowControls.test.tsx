@@ -19,7 +19,8 @@ const mocks = vi.hoisted(() => ({
   setTabBarOrder: vi.fn(),
   queueTabStartupCommand: vi.fn(),
   focusTerminalTabSurface: vi.fn(),
-  buildAgentStartupPlan: vi.fn()
+  buildAgentStartupPlan: vi.fn(),
+  launchAgentInNewTab: vi.fn()
 }))
 
 vi.mock('react', async () => {
@@ -39,6 +40,10 @@ vi.mock('@/store', () => ({
 
 vi.mock('@/lib/focus-terminal-tab-surface', () => ({
   focusTerminalTabSurface: mocks.focusTerminalTabSurface
+}))
+
+vi.mock('@/lib/launch-agent-in-new-tab', () => ({
+  launchAgentInNewTab: mocks.launchAgentInNewTab
 }))
 
 vi.mock('@/lib/tui-agent-startup', () => ({
@@ -161,6 +166,7 @@ beforeEach(() => {
     env: undefined,
     startupCommandDelivery: undefined
   })
+  mocks.launchAgentInNewTab.mockReturnValue({ tabId: NEW_AGENT_TAB_ID })
   storeBox.state = {
     settings: {
       defaultTuiAgent: 'claude',
@@ -184,7 +190,7 @@ afterEach(() => {
 })
 
 describe('FloatingTerminalWindowControls default-agent launch', () => {
-  it('activates the new agent tab so the floating panel selects and focuses it', () => {
+  it('routes the floating default-agent action through the centralized launch policy', () => {
     ;(
       storeBox.state as {
         settings: Record<string, unknown>
@@ -201,42 +207,11 @@ describe('FloatingTerminalWindowControls default-agent launch', () => {
     const launch = findOnClickByAriaLabel(element, 'Open Claude in floating workspace')
     launch()
 
-    expect(mocks.buildAgentStartupPlan.mock.calls[0]?.[0]).not.toHaveProperty('sessionOptions')
-
-    expect(mocks.createTab).toHaveBeenCalledWith(
-      FLOATING_TERMINAL_WORKTREE_ID,
-      undefined,
-      undefined,
-      { activate: false }
-    )
-    // Why: TerminalPane consumes any pending startup command on first render, so
-    // the launch command must be queued before activation can mount the surface -
-    // otherwise the new tab can come up as a bare shell.
-    expect(mocks.queueTabStartupCommand).toHaveBeenCalledWith(
-      NEW_AGENT_TAB_ID,
-      expect.objectContaining({
-        command: 'claude',
-        launchAgent: 'claude'
-      })
-    )
-    expect(mocks.queueTabStartupCommand.mock.invocationCallOrder[0]).toBeLessThan(
-      mocks.activateTab.mock.invocationCallOrder[0]
-    )
-    // Why: the floating panel renders its visible tab from the unified group's
-    // activeTabId, which only activateTab writes. setActiveTabForWorktree updates
-    // the complementary legacy per-worktree map. Without activateTab the new agent
-    // tab would be appended but never selected/focused.
-    expect(mocks.setActiveTabForWorktree).toHaveBeenCalledWith(
-      FLOATING_TERMINAL_WORKTREE_ID,
-      NEW_AGENT_TAB_ID
-    )
-    expect(mocks.activateTab).toHaveBeenCalledWith(NEW_AGENT_TAB_ID)
+    expect(mocks.launchAgentInNewTab).toHaveBeenCalledWith({
+      agent: 'claude',
+      worktreeId: FLOATING_TERMINAL_WORKTREE_ID,
+      launchSource: 'shortcut'
+    })
     expect(mocks.focusTerminalTabSurface).toHaveBeenCalledWith(NEW_AGENT_TAB_ID)
-    // Why: createTab appends the new tab to the worktree; the order reconciliation
-    // must keep the pre-existing tab and place the new agent tab last.
-    expect(mocks.setTabBarOrder).toHaveBeenCalledWith(FLOATING_TERMINAL_WORKTREE_ID, [
-      EXISTING_TAB_ID,
-      NEW_AGENT_TAB_ID
-    ])
   })
 })

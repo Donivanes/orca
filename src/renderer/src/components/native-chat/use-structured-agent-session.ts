@@ -21,10 +21,8 @@ import {
 import { activeStructuredAgentSessionTurnId } from '../../../../shared/structured-agent-session-projection'
 import type { RuntimeClientTarget } from '@/runtime/runtime-rpc-client'
 import { callStructuredAgentSession } from '@/runtime/structured-agent-session-client'
-import {
-  structuredSessionOperationId,
-  useStructuredAgentSessionOutbox
-} from './use-structured-agent-session-outbox'
+import { useStructuredAgentSessionOutbox } from './use-structured-agent-session-outbox'
+import { structuredSessionOperationId } from '@/lib/structured-agent-session-outbox-storage'
 import { useStructuredAgentSessionHold } from './use-structured-agent-session-hold'
 import { useStructuredAgentSessionRead } from './use-structured-agent-session-read'
 import { projectStructuredAgentSessionMessages } from './structured-agent-session-message-projection'

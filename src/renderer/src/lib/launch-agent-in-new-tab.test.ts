@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { toAppSshPtyId } from '../../../shared/ssh-pty-id'
 import { FLOATING_TERMINAL_WORKTREE_ID } from '../../../shared/constants'
+import type {
+  StructuredCodexLaunchReceipt,
+  StructuredCodexLaunchResult
+} from '@/lib/structured-agent-session-launch'
 
 const mockCreateTab = vi.fn()
 const mockQueueTabStartupCommand = vi.fn()
@@ -15,8 +18,35 @@ const mockMarkNativeChatLaunchPromptFailed = vi.fn()
 const mockTrack = vi.fn()
 const mockToastMessage = vi.fn()
 const mockWaitForAgentReady = vi.fn()
+const mockStartStructuredCodexLaunch = vi.fn()
 
-const LEAF_ID = '11111111-1111-4111-8111-111111111111'
+function structuredLaunchResult(
+  launchResult: Promise<StructuredCodexLaunchReceipt>,
+  promptDeliveryResult?: StructuredCodexLaunchResult['promptDeliveryResult']
+): StructuredCodexLaunchResult {
+  let fallbackResult: Promise<boolean> | null = null
+  return {
+    sessionId: 'codex-session-1',
+    launchResult,
+    ...(promptDeliveryResult ? { promptDeliveryResult } : {}),
+    claimDefinitiveRefusalFallback: (fallback) => {
+      fallbackResult ??= launchResult.then(
+        () => false,
+        async (error) => {
+          if (
+            !(error instanceof Error) ||
+            error.constructor.name !== 'StructuredAgentSessionCreateRefusalError'
+          ) {
+            return false
+          }
+          await fallback()
+          return true
+        }
+      )
+      return fallbackResult
+    }
+  }
+}
 
 const store = {
   activeRepoId: 'repo-1',
@@ -137,6 +167,17 @@ vi.mock('@/runtime/web-runtime-session', () => ({
   isWebTerminalSurfaceTabId: vi.fn(() => false)
 }))
 
+vi.mock('@/lib/structured-agent-session-launch', () => ({
+  startStructuredCodexLaunch: mockStartStructuredCodexLaunch
+}))
+vi.mock('@/runtime/local-runtime-capabilities', () => ({
+  readLocalRuntimeCapabilities: () => [
+    'agent-session.structured.v1',
+    'agent-session.structured.codex.v1',
+    'agent-session.structured.initial-options.v1'
+  ]
+}))
+
 describe('launchAgentInNewTab', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -180,6 +221,12 @@ describe('launchAgentInNewTab', () => {
     mockCreateTab.mockReturnValue({ id: 'tab-1' })
     mockPasteDraftWhenAgentReady.mockResolvedValue(true)
     mockWaitForAgentReady.mockResolvedValue({ ready: true, reason: 'foreground-match' })
+    mockStartStructuredCodexLaunch.mockReturnValue(
+      structuredLaunchResult(
+        Promise.resolve({ sessionId: 'codex-session-1', fence: 1 }),
+        Promise.resolve({ delivered: true, failureNotified: false })
+      )
+    )
   })
 
   it('stamps the launched agent on the new tab for immediate provider icon bootstrap', async () => {
@@ -220,7 +267,7 @@ describe('launchAgentInNewTab', () => {
     )
   })
 
-  it('keeps prompted Codex launches on the ordinary terminal path', async () => {
+  it('routes prompted Codex launches through structured chat without a terminal', async () => {
     store.settings = {
       agentCmdOverrides: {},
       agentDefaultArgs: {},
@@ -232,30 +279,102 @@ describe('launchAgentInNewTab', () => {
     }
     const { launchAgentInNewTab } = await import('./launch-agent-in-new-tab')
 
-    launchAgentInNewTab({
+    const result = launchAgentInNewTab({
       agent: 'codex',
       worktreeId: 'wt-1',
       prompt: 'large generated prompt',
       promptDelivery: 'submit-after-ready'
     })
 
-    expect(mockCreateTab).toHaveBeenCalledWith('wt-1', undefined, undefined, {
-      launchAgent: 'codex',
-      viewMode: 'chat'
+    expect(result).toMatchObject({
+      tabId: null,
+      focusAfterMenuClose: 'structured-session'
     })
-    expect(mockQueueTabStartupCommand).toHaveBeenCalledWith(
-      'tab-1',
-      expect.objectContaining({
-        command: expect.not.stringContaining('large generated prompt')
-      })
+    expect(mockStartStructuredCodexLaunch).toHaveBeenCalledWith('wt-1', {
+      prompt: 'large generated prompt',
+      promptDelivery: 'submit-after-ready',
+      onPromptDelivered: undefined,
+      telemetry: {
+        agent_kind: 'codex',
+        launch_source: 'tab_bar_quick_launch',
+        request_kind: 'new'
+      }
+    })
+    expect(mockCreateTab).not.toHaveBeenCalled()
+    expect(mockQueueTabStartupCommand).not.toHaveBeenCalled()
+  })
+
+  it('falls back to one TUI only after a definitive structured refusal', async () => {
+    store.settings = {
+      agentCmdOverrides: {},
+      agentDefaultArgs: {},
+      agentDefaultEnv: {},
+      activeRuntimeEnvironmentId: null,
+      experimentalNativeChat: true,
+      experimentalStructuredNativeChat: true,
+      openAgentTabsInChatByDefault: true
+    }
+    const { StructuredAgentSessionCreateRefusalError } =
+      await import('@/lib/launch-structured-codex-session')
+    mockStartStructuredCodexLaunch.mockReturnValueOnce(
+      structuredLaunchResult(
+        Promise.reject(new StructuredAgentSessionCreateRefusalError('refused'))
+      )
     )
-    expect(mockSeedNativeChatLaunchPrompt).toHaveBeenCalledWith({
-      tabId: 'tab-1',
-      agent: 'codex',
-      text: 'large generated prompt',
-      createdAt: expect.any(Number)
-    })
-    expect(mockSetTabViewMode).not.toHaveBeenCalled()
+    const { launchAgentInNewTab } = await import('./launch-agent-in-new-tab')
+
+    launchAgentInNewTab({ agent: 'codex', worktreeId: 'wt-1' })
+    await vi.waitFor(() => expect(mockCreateTab).toHaveBeenCalledOnce())
+
+    expect(mockQueueTabStartupCommand).toHaveBeenCalledOnce()
+  })
+
+  it('does not duplicate a possibly live provider after uncertain structured failure', async () => {
+    store.settings = {
+      agentCmdOverrides: {},
+      agentDefaultArgs: {},
+      agentDefaultEnv: {},
+      activeRuntimeEnvironmentId: null,
+      experimentalNativeChat: true,
+      experimentalStructuredNativeChat: true,
+      openAgentTabsInChatByDefault: true
+    }
+    mockStartStructuredCodexLaunch.mockReturnValueOnce(
+      structuredLaunchResult(Promise.reject(new Error('publication unavailable')))
+    )
+    const { launchAgentInNewTab } = await import('./launch-agent-in-new-tab')
+
+    launchAgentInNewTab({ agent: 'codex', worktreeId: 'wt-1' })
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mockCreateTab).not.toHaveBeenCalled()
+    expect(mockQueueTabStartupCommand).not.toHaveBeenCalled()
+  })
+
+  it('single-flights the definitive-refusal TUI fallback across duplicate callers', async () => {
+    store.settings = {
+      agentCmdOverrides: {},
+      agentDefaultArgs: {},
+      agentDefaultEnv: {},
+      activeRuntimeEnvironmentId: null,
+      experimentalNativeChat: true,
+      experimentalStructuredNativeChat: true,
+      openAgentTabsInChatByDefault: true
+    }
+    const { StructuredAgentSessionCreateRefusalError } =
+      await import('@/lib/launch-structured-codex-session')
+    const refused = structuredLaunchResult(
+      Promise.reject(new StructuredAgentSessionCreateRefusalError('refused'))
+    )
+    mockStartStructuredCodexLaunch.mockReturnValue(refused)
+    const { launchAgentInNewTab } = await import('./launch-agent-in-new-tab')
+
+    launchAgentInNewTab({ agent: 'codex', worktreeId: 'wt-1' })
+    launchAgentInNewTab({ agent: 'codex', worktreeId: 'wt-1' })
+    await vi.waitFor(() => expect(mockCreateTab).toHaveBeenCalledOnce())
+
+    expect(mockQueueTabStartupCommand).toHaveBeenCalledOnce()
   })
 
   it('opens local Grok submit-after-ready launches in native chat', async () => {
@@ -416,14 +535,14 @@ describe('launchAgentInNewTab', () => {
     expect(launch.sessionOptions).toBeUndefined()
   })
 
-  it('applies native-chat model preferences to Quick Commands opened in chat', async () => {
+  it('preserves legacy Quick Command launch preferences when restructure is off', async () => {
     store.settings = {
       agentCmdOverrides: {},
       agentDefaultArgs: {},
       agentDefaultEnv: {},
       activeRuntimeEnvironmentId: null,
       experimentalNativeChat: true,
-      experimentalStructuredNativeChat: true,
+      experimentalStructuredNativeChat: false,
       openAgentTabsInChatByDefault: true,
       nativeChatSessionOptions: {
         codex: {
@@ -453,6 +572,69 @@ describe('launchAgentInNewTab', () => {
       expect.objectContaining({ viewMode: 'chat' })
     )
     expect(mockSetTabViewMode).not.toHaveBeenCalled()
+  })
+
+  it('routes chat-default Quick Commands through structured chat', async () => {
+    store.settings = {
+      agentCmdOverrides: {},
+      agentDefaultArgs: {},
+      agentDefaultEnv: {},
+      activeRuntimeEnvironmentId: null,
+      experimentalNativeChat: true,
+      experimentalStructuredNativeChat: true,
+      openAgentTabsInChatByDefault: true
+    }
+    const { launchAgentInNewTab } = await import('./launch-agent-in-new-tab')
+
+    launchAgentInNewTab({
+      agent: 'codex',
+      worktreeId: 'wt-1',
+      prompt: 'Review this diff',
+      launchSource: 'quick_command',
+      quickCommandLabel: 'Review'
+    })
+
+    expect(mockStartStructuredCodexLaunch).toHaveBeenCalledWith('wt-1', {
+      prompt: 'Review this diff',
+      promptDelivery: 'auto-submit',
+      onPromptDelivered: undefined,
+      telemetry: {
+        agent_kind: 'codex',
+        launch_source: 'quick_command',
+        request_kind: 'new'
+      }
+    })
+    expect(mockCreateTab).not.toHaveBeenCalled()
+    expect(mockQueueTabStartupCommand).not.toHaveBeenCalled()
+  })
+
+  it('passes persisted Codex model and effort before the structured first turn', async () => {
+    store.settings = {
+      agentCmdOverrides: {},
+      agentDefaultArgs: {},
+      agentDefaultEnv: {},
+      activeRuntimeEnvironmentId: null,
+      experimentalNativeChat: true,
+      experimentalStructuredNativeChat: true,
+      openAgentTabsInChatByDefault: true,
+      nativeChatSessionOptions: {
+        codex: {
+          model: 'gpt-5.2-codex',
+          valuesByModel: { 'gpt-5.2-codex': { effort: 'medium' } }
+        }
+      }
+    }
+    const { launchAgentInNewTab } = await import('./launch-agent-in-new-tab')
+
+    launchAgentInNewTab({ agent: 'codex', worktreeId: 'wt-1' })
+
+    expect(mockStartStructuredCodexLaunch).toHaveBeenCalledWith(
+      'wt-1',
+      expect.objectContaining({
+        initialOptions: { model: 'gpt-5.2-codex', effort: 'medium' }
+      })
+    )
+    expect(mockQueueTabStartupCommand).not.toHaveBeenCalled()
   })
 
   it('preserves paired-host draft delivery and supported launch preferences', async () => {
@@ -574,326 +756,5 @@ describe('launchAgentInNewTab', () => {
       'Upgrade the remote Orca host before starting or resuming agent sessions.'
     )
     expect(mockSetActiveTabType).not.toHaveBeenCalled()
-  })
-
-  it('queues initial working status for Command Code argv prompt launches', async () => {
-    const { launchAgentInNewTab } = await import('./launch-agent-in-new-tab')
-
-    launchAgentInNewTab({
-      agent: 'command-code',
-      worktreeId: 'wt-1',
-      prompt: 'fix the spinner'
-    })
-
-    expect(mockQueueTabStartupCommand).toHaveBeenCalledWith(
-      'tab-1',
-      expect.objectContaining({
-        command: "command-code --trust '--yolo' 'fix the spinner'",
-        initialAgentStatus: {
-          agent: 'command-code',
-          prompt: 'fix the spinner'
-        }
-      })
-    )
-  })
-
-  it('does not track prompt-sent for argv prompt launches', async () => {
-    const { launchAgentInNewTab } = await import('./launch-agent-in-new-tab')
-
-    launchAgentInNewTab({
-      agent: 'codex',
-      worktreeId: 'wt-1',
-      prompt: 'fix the spinner',
-      launchSource: 'onboarding'
-    })
-  })
-
-  it('does not track prompt-sent for draft launches', async () => {
-    const { launchAgentInNewTab } = await import('./launch-agent-in-new-tab')
-
-    launchAgentInNewTab({
-      agent: 'claude',
-      worktreeId: 'wt-1',
-      prompt: 'review this before sending',
-      promptDelivery: 'draft'
-    })
-
-    expect(mockTrack).not.toHaveBeenCalledWith('agent_prompt_sent', expect.anything())
-  })
-
-  it('falls back to post-ready draft paste when a Windows inline draft would be too large', async () => {
-    const { launchAgentInNewTab } = await import('./launch-agent-in-new-tab')
-    const prompt = 'x'.repeat(25_000)
-
-    const result = launchAgentInNewTab({
-      agent: 'claude',
-      worktreeId: 'wt-1',
-      prompt,
-      promptDelivery: 'draft',
-      launchPlatform: 'win32'
-    })
-
-    expect(result).not.toHaveProperty('promptDeliveryResult')
-    expect(mockQueueTabStartupCommand).toHaveBeenCalledWith(
-      'tab-1',
-      expect.objectContaining({
-        command: "claude '--dangerously-skip-permissions'"
-      })
-    )
-    expect(mockPasteDraftWhenAgentReady).toHaveBeenCalledWith(
-      expect.objectContaining({
-        tabId: 'tab-1',
-        content: prompt,
-        agent: 'claude',
-        submit: false,
-        forcePaste: false
-      })
-    )
-  })
-
-  it('logs rejected non-deferred prompt delivery without exposing it to callers', async () => {
-    const error = new Error('paste failed')
-    const originalConsole = console
-    const consoleError = vi.fn()
-    vi.stubGlobal('console', { ...originalConsole, error: consoleError })
-    mockPasteDraftWhenAgentReady.mockRejectedValue(error)
-    const { launchAgentInNewTab } = await import('./launch-agent-in-new-tab')
-    const prompt = 'x'.repeat(25_000)
-
-    try {
-      const result = launchAgentInNewTab({
-        agent: 'claude',
-        worktreeId: 'wt-1',
-        prompt,
-        promptDelivery: 'draft',
-        launchPlatform: 'win32'
-      })
-
-      expect(result).not.toHaveProperty('promptDeliveryResult')
-      await new Promise((resolve) => setTimeout(resolve, 0))
-      expect(consoleError).toHaveBeenCalledWith('Prompt delivery failed after launch', error)
-    } finally {
-      vi.stubGlobal('console', originalConsole)
-    }
-  })
-
-  it('seeds working after Command Code submit-after-ready prompt delivery', async () => {
-    store.repos = [{ id: 'repo-1', connectionId: 'ssh-a', path: '/repo' }]
-    const { launchAgentInNewTab } = await import('./launch-agent-in-new-tab')
-
-    const result = launchAgentInNewTab({
-      agent: 'command-code',
-      worktreeId: 'wt-1',
-      prompt: 'large generated prompt',
-      promptDelivery: 'submit-after-ready'
-    })
-    store.terminalLayoutsByTabId = {
-      'tab-1': {
-        activeLeafId: LEAF_ID,
-        ptyIdsByLeafId: { [LEAF_ID]: toAppSshPtyId('ssh-a', 'pty-1') }
-      }
-    }
-    store.ptyIdsByTabId = { 'tab-1': [toAppSshPtyId('ssh-a', 'pty-1')] }
-    await expect(result?.promptDeliveryResult).resolves.toEqual({
-      delivered: true,
-      failureNotified: false
-    })
-    await Promise.resolve()
-    await Promise.resolve()
-
-    expect(mockQueueTabStartupCommand).toHaveBeenCalledWith(
-      'tab-1',
-      expect.objectContaining({
-        command: "command-code --trust '--yolo'"
-      })
-    )
-    expect(mockPasteDraftWhenAgentReady).toHaveBeenCalledWith(
-      expect.objectContaining({
-        tabId: 'tab-1',
-        content: 'large generated prompt',
-        agent: 'command-code',
-        submit: true,
-        forcePaste: true
-      })
-    )
-    expect(mockSetAgentStatus).toHaveBeenCalledWith(
-      `tab-1:${LEAF_ID}`,
-      {
-        state: 'working',
-        prompt: 'large generated prompt',
-        agentType: 'command-code',
-        // Why: seeded from Orca's own prompt delivery, not a provider hook (STA-4293).
-        observation: expect.objectContaining({ origin: 'process', kind: 'transition' })
-      },
-      undefined,
-      undefined,
-      { connectionId: 'ssh-a' }
-    )
-    expect(mockTrack).not.toHaveBeenCalledWith('agent_prompt_sent', expect.anything())
-  })
-
-  it('does not recreate SSH status when clear arrives before disconnect state', async () => {
-    let finishDelivery: ((delivered: boolean) => void) | undefined
-    mockPasteDraftWhenAgentReady.mockReturnValue(
-      new Promise<boolean>((resolve) => {
-        finishDelivery = resolve
-      })
-    )
-    store.repos = [{ id: 'repo-1', connectionId: 'ssh-a', path: '/repo' }]
-    const ptyId = toAppSshPtyId('ssh-a', 'pty-1')
-    const { launchAgentInNewTab } = await import('./launch-agent-in-new-tab')
-
-    const result = launchAgentInNewTab({
-      agent: 'command-code',
-      worktreeId: 'wt-1',
-      prompt: 'pending prompt',
-      promptDelivery: 'submit-after-ready'
-    })
-    store.terminalLayoutsByTabId = {
-      'tab-1': { activeLeafId: LEAF_ID, ptyIdsByLeafId: { [LEAF_ID]: ptyId } }
-    }
-    store.ptyIdsByTabId = { 'tab-1': [ptyId] }
-
-    // Why: explicit disconnect sends the transient clear before its state
-    // event, while the old connection can still appear connected and bound.
-    store.transientClearedAgentStatusConnectionIds = { 'ssh-a': true }
-    finishDelivery?.(true)
-    await expect(result?.promptDeliveryResult).resolves.toEqual({
-      delivered: true,
-      failureNotified: false
-    })
-
-    expect(mockSetAgentStatus).not.toHaveBeenCalled()
-  })
-
-  it('does not track prompt-sent when submit-after-ready delivery fails', async () => {
-    mockPasteDraftWhenAgentReady.mockResolvedValue(false)
-    const { launchAgentInNewTab } = await import('./launch-agent-in-new-tab')
-
-    const result = launchAgentInNewTab({
-      agent: 'command-code',
-      worktreeId: 'wt-1',
-      prompt: 'large generated prompt',
-      promptDelivery: 'submit-after-ready'
-    })
-    await expect(result?.promptDeliveryResult).resolves.toEqual({
-      delivered: false,
-      failureNotified: false
-    })
-    await Promise.resolve()
-
-    expect(mockTrack).not.toHaveBeenCalledWith('agent_prompt_sent', expect.anything())
-  })
-
-  it('marks failed submit-after-ready delivery as notified after readiness timeout toast', async () => {
-    mockPasteDraftWhenAgentReady.mockImplementation(({ onTimeout }) => {
-      onTimeout?.()
-      return Promise.resolve(false)
-    })
-    store.tabsByWorktree = { 'wt-1': [{ id: 'tab-1', ptyId: 'pty-1' } as never] }
-    const { launchAgentInNewTab } = await import('./launch-agent-in-new-tab')
-
-    const result = launchAgentInNewTab({
-      agent: 'command-code',
-      worktreeId: 'wt-1',
-      prompt: 'large generated prompt',
-      promptDelivery: 'submit-after-ready'
-    })
-
-    await expect(result?.promptDeliveryResult).resolves.toEqual({
-      delivered: false,
-      failureNotified: true
-    })
-    expect(mockToastMessage).toHaveBeenCalledWith(
-      "Your prompt wasn't sent — paste it once the agent is ready."
-    )
-  })
-
-  it('marks a cancelled submit-after-ready launch notified when the user closed the tab', async () => {
-    mockPasteDraftWhenAgentReady.mockImplementation(({ onTimeout }) => {
-      onTimeout?.()
-      return Promise.resolve(false)
-    })
-    // User closed the tab before the agent became ready — it is gone from the list.
-    store.tabsByWorktree = { 'wt-1': [] }
-    const { launchAgentInNewTab } = await import('./launch-agent-in-new-tab')
-
-    const result = launchAgentInNewTab({
-      agent: 'command-code',
-      worktreeId: 'wt-1',
-      prompt: 'large generated prompt',
-      promptDelivery: 'submit-after-ready'
-    })
-
-    await expect(result?.promptDeliveryResult).resolves.toEqual({
-      delivered: false,
-      failureNotified: true
-    })
-    expect(mockToastMessage).not.toHaveBeenCalled()
-  })
-
-  it('marks a cancelled submit-after-ready launch notified when the user switched worktrees', async () => {
-    mockPasteDraftWhenAgentReady.mockImplementation(({ onTimeout }) => {
-      onTimeout?.()
-      return Promise.resolve(false)
-    })
-    store.tabsByWorktree = { 'wt-1': [{ id: 'tab-1', ptyId: 'pty-1' } as never] }
-    store.activeWorktreeId = 'wt-2'
-    const { launchAgentInNewTab } = await import('./launch-agent-in-new-tab')
-
-    const result = launchAgentInNewTab({
-      agent: 'command-code',
-      worktreeId: 'wt-1',
-      prompt: 'large generated prompt',
-      promptDelivery: 'submit-after-ready'
-    })
-
-    await expect(result?.promptDeliveryResult).resolves.toEqual({
-      delivered: false,
-      failureNotified: true
-    })
-    expect(mockToastMessage).not.toHaveBeenCalled()
-  })
-
-  it('leaves a genuine launch failure unnotified so the caller surfaces it', async () => {
-    mockPasteDraftWhenAgentReady.mockImplementation(({ onTimeout }) => {
-      onTimeout?.()
-      return Promise.resolve(false)
-    })
-    // PTY never spawned: a real failure, not a user cancellation.
-    store.tabsByWorktree = { 'wt-1': [{ id: 'tab-1', ptyId: null } as never] }
-    const { launchAgentInNewTab } = await import('./launch-agent-in-new-tab')
-
-    const result = launchAgentInNewTab({
-      agent: 'command-code',
-      worktreeId: 'wt-1',
-      prompt: 'large generated prompt',
-      promptDelivery: 'submit-after-ready'
-    })
-
-    await expect(result?.promptDeliveryResult).resolves.toEqual({
-      delivered: false,
-      failureNotified: false
-    })
-    expect(mockToastMessage).not.toHaveBeenCalled()
-  })
-
-  it('queues per-launch CLI arguments without putting generated prompts in argv', async () => {
-    const { launchAgentInNewTab } = await import('./launch-agent-in-new-tab')
-
-    launchAgentInNewTab({
-      agent: 'codex',
-      worktreeId: 'wt-1',
-      prompt: 'large generated prompt',
-      agentArgs: '--model gpt-5.5',
-      promptDelivery: 'submit-after-ready'
-    })
-
-    expect(mockQueueTabStartupCommand).toHaveBeenCalledWith(
-      'tab-1',
-      expect.objectContaining({
-        command: "codex '--model' 'gpt-5.5'"
-      })
-    )
   })
 })

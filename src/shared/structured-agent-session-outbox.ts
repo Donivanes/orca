@@ -14,6 +14,7 @@ export type StructuredAgentSessionOutboxEntry = {
   queuedAt: number
   lastAttemptAt: number | null
   retryAfterUnknownSubmittedAt: number | null
+  launchPending?: true
 }
 
 export type StructuredAgentSessionAttachment = {
@@ -139,7 +140,8 @@ export function parseStructuredAgentSessionOutboxEntry(
     retryAfterUnknownSubmittedAt:
       typeof entry.retryAfterUnknownSubmittedAt === 'number'
         ? entry.retryAfterUnknownSubmittedAt
-        : null
+        : null,
+    ...(entry.launchPending === true ? { launchPending: true } : {})
   }
 }
 

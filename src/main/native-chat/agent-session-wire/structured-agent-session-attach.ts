@@ -54,8 +54,12 @@ export type AgentSessionAttachParams = {
   agent: AgentType
   accountHome: AgentSessionAccountHome
   runtimeKind: AgentSessionOwnerRuntimeKind
+  /** Create-only options that must be validated before the first provider turn. */
+  initialOptions?: Readonly<Record<string, string>>
   /** Omitted only for create-by-intent; the adapter proves the durable handle. */
   providerHandle?: Exclude<AgentSessionProviderHandle, { kind: 'opaque' }>
+  /** Host-only fingerprint for a create intent admitted before host-owned fields were resolved. */
+  operationFingerprint?: string
 }
 
 /** Host-supplied half of the reservation. */
@@ -78,6 +82,7 @@ export function attachFingerprintFields(params: AgentSessionAttachParams): Recor
     agent: params.agent,
     accountHome: params.accountHome,
     runtimeKind: params.runtimeKind,
+    initialOptions: params.initialOptions,
     providerHandle: params.providerHandle,
     expectedRuntimeFence: params.envelope.expectedRuntimeFence
   }
@@ -182,6 +187,7 @@ export function reserveRequestFor(input: {
     location: params.location,
     provider: params.provider,
     accountHome: params.accountHome,
+    ...(params.initialOptions ? { initialOptions: params.initialOptions } : {}),
     ...(authority.launchArgs ? { launchArgs: authority.launchArgs } : {}),
     ...(authority.launchEnv ? { launchEnv: authority.launchEnv } : {}),
     runtimeKind: params.runtimeKind,
@@ -193,7 +199,7 @@ export function reserveRequestFor(input: {
     operation: {
       callerKey: input.callerKey,
       operationId: params.envelope.clientOperationId,
-      fingerprint: input.fingerprint
+      fingerprint: params.operationFingerprint ?? input.fingerprint
     },
     now: input.now
   }

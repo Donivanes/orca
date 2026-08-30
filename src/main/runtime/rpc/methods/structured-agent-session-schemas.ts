@@ -10,6 +10,7 @@ import {
   AGENT_SESSION_HISTORY_MAX_LIMIT
 } from '../../../../shared/agent-session-wire'
 import { normalizeExecutionHostId } from '../../../../shared/execution-host'
+import { launchSourceSchema, requestKindSchema } from '../../../../shared/telemetry-events'
 
 const MAX_ID_LENGTH = 512
 const MAX_PROMPT_BYTES = 256 * 1024
@@ -98,7 +99,22 @@ export const CreateIntentParams = z
   .object({
     envelope: MutationEnvelope,
     worktree: Identifier('Invalid worktree selector'),
-    agent: z.literal('codex')
+    agent: z.literal('codex'),
+    initialOptions: z
+      .object({
+        model: Identifier('Invalid initial model'),
+        effort: Identifier('Invalid initial effort').optional()
+      })
+      .strict()
+      .optional(),
+    telemetry: z
+      .object({
+        agent_kind: z.literal('codex'),
+        launch_source: launchSourceSchema,
+        request_kind: requestKindSchema
+      })
+      .strict()
+      .optional()
   })
   .strict()
 

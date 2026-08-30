@@ -13,6 +13,8 @@ import type {
 import type { AgentStartupPlan } from '@/lib/tui-agent-startup'
 import type { AgentStartedTelemetry } from '@/lib/worktree-startup-payload'
 import type { TaskSourceContext, WorkspaceRunContext } from '../../../shared/task-source-context'
+import type { AgentLaunchRoute } from '@/lib/agent-launch-routing'
+import type { StructuredCodexInitialOptions } from '@/lib/launch-structured-codex-session'
 
 /** Two-phase status reported by the main process while a worktree is created.
  *  `preparing` covers renderer-side preflight before `createWorktree` starts;
@@ -75,6 +77,9 @@ export type WorktreeCreationRequest = {
   linkedPR?: number
   pushTarget?: GitPushTarget
   agent: TuiAgent | null
+  /** Serializable runtime/UI policy result captured before the workspace exists. */
+  agentLaunchRoute?: AgentLaunchRoute
+  structuredInitialOptions?: StructuredCodexInitialOptions
   linkedLinearIssue?: string
   linkedLinearIssueWorkspaceId?: string | null
   linkedLinearIssueOrganizationUrlKey?: string | null

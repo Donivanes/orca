@@ -266,6 +266,7 @@ async function acquireOwner(
       // Retries must recover the original reservation, not mint a second child.
       spawnToken,
       ...(record.options ? { options: record.options } : {}),
+      ...(input.params.initialOptions ? { validateOptions: true } : {}),
       ...(input.eventSink ? { events: input.eventSink } : {})
     })
     const options = await readNativeSessionOptions({

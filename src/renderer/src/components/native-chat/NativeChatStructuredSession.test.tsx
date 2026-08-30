@@ -12,8 +12,13 @@ const mocks = vi.hoisted(() => ({
     allowFileUriLinks?: boolean
     onLinkClick?: (...args: unknown[]) => void
   },
-  composerProps: null as null | { structuredTransport?: Record<string, unknown> },
-  submissions: [] as unknown[]
+  composerProps: null as null | {
+    structuredTransport?: Record<string, unknown>
+    launchDraft?: unknown
+    launchDraftResolved?: boolean
+  },
+  submissions: [] as unknown[],
+  launchDraftSignal: { launchDraft: null as unknown, launchDraftResolved: false }
 }))
 
 vi.mock('@/runtime/structured-agent-session-client', () => ({
@@ -129,6 +134,7 @@ describe('NativeChatStructuredSession', () => {
     mocks.messageListProps = null
     mocks.composerProps = null
     mocks.submissions = []
+    mocks.launchDraftSignal = { launchDraft: null as unknown, launchDraftResolved: false }
   })
 
   it('wires local structured file links through the native chat opener', () => {
@@ -198,7 +204,7 @@ describe('NativeChatStructuredSession', () => {
     const send = mocks.composerProps?.structuredTransport?.send as
       | ((text: string, attachments: readonly { id: string; path: string }[]) => boolean)
       | undefined
-    expect(send?.('hello', [])).toBe(true)
+    await expect(send?.('hello', [])).resolves.toBe(true)
     await waitFor(() => expect(mocks.call).toHaveBeenCalledOnce())
     await waitFor(() => expect(screen.getByText('Message delivery is unconfirmed.')).toBeTruthy())
 
@@ -230,11 +236,11 @@ describe('NativeChatStructuredSession', () => {
     const send = mocks.composerProps?.structuredTransport?.send as
       | ((text: string, attachments: readonly { id: string; path: string }[]) => boolean)
       | undefined
-    expect(send?.('first', [])).toBe(true)
+    await expect(send?.('first', [])).resolves.toBe(true)
     await waitFor(() => expect(mocks.call).toHaveBeenCalledOnce())
     await waitFor(() => expect(screen.getByText('Message delivery is unconfirmed.')).toBeTruthy())
 
-    expect(send?.('second', [])).toBe(true)
+    await expect(send?.('second', [])).resolves.toBe(true)
     // The head is probed automatically, clears, and the queue drains.
     await waitFor(() => expect(mocks.call).toHaveBeenCalledTimes(3), { timeout: 10000 })
     await waitFor(() => expect(screen.queryByText('Message delivery is unconfirmed.')).toBeNull())
@@ -262,7 +268,7 @@ describe('NativeChatStructuredSession', () => {
     const send = mocks.composerProps?.structuredTransport?.send as
       | ((text: string, attachments: readonly { id: string; path: string }[]) => boolean)
       | undefined
-    expect(send?.('first', [])).toBe(true)
+    await expect(send?.('first', [])).resolves.toBe(true)
     await waitFor(() => expect(mocks.call).toHaveBeenCalledTimes(2), { timeout: 10000 })
 
     const first = mocks.call.mock.calls[0]?.[2] as Record<string, unknown>
@@ -295,7 +301,7 @@ describe('NativeChatStructuredSession', () => {
     const send = mocks.composerProps?.structuredTransport?.send as
       | ((text: string, attachments: readonly { id: string; path: string }[]) => boolean)
       | undefined
-    expect(send?.('first', [])).toBe(true)
+    await expect(send?.('first', [])).resolves.toBe(true)
     await waitFor(() => expect(mocks.call).toHaveBeenCalledOnce())
 
     const sent = mocks.call.mock.calls[0]?.[2] as { envelope: { clientOperationId: string } }
@@ -315,7 +321,7 @@ describe('NativeChatStructuredSession', () => {
     // Queue a second message purely to re-render so the effect observes the
     // new submissions; it must stay wedged behind the parked head.
     await act(async () => {
-      send?.('second', [])
+      await send?.('second', [])
     })
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 3000))
@@ -346,7 +352,7 @@ describe('NativeChatStructuredSession', () => {
     const send = mocks.composerProps?.structuredTransport?.send as
       | ((text: string, attachments: readonly { id: string; path: string }[]) => boolean)
       | undefined
-    expect(send?.('first', [])).toBe(true)
+    await expect(send?.('first', [])).resolves.toBe(true)
     await waitFor(() => expect(mocks.call).toHaveBeenCalledOnce())
 
     // Each batch mints a fresh submissions array for an unrelated message. An
@@ -399,7 +405,7 @@ describe('NativeChatStructuredSession', () => {
     const send = mocks.composerProps?.structuredTransport?.send as
       | ((text: string, attachments: readonly { id: string; path: string }[]) => boolean)
       | undefined
-    expect(send?.('first', [])).toBe(true)
+    await expect(send?.('first', [])).resolves.toBe(true)
     await waitFor(() => expect(mocks.call).toHaveBeenCalledOnce())
     await waitFor(() => expect(screen.getByText('Message delivery is unconfirmed.')).toBeTruthy())
 
@@ -434,7 +440,7 @@ describe('NativeChatStructuredSession', () => {
     const send = mocks.composerProps?.structuredTransport?.send as
       | ((text: string, attachments: readonly { id: string; path: string }[]) => boolean)
       | undefined
-    expect(send?.('first', [])).toBe(true)
+    await expect(send?.('first', [])).resolves.toBe(true)
     await waitFor(() => expect(mocks.call).toHaveBeenCalledOnce())
     await waitFor(() => expect(screen.getByText('Message delivery is unconfirmed.')).toBeTruthy())
 
@@ -473,7 +479,7 @@ describe('NativeChatStructuredSession', () => {
     const send = mocks.composerProps?.structuredTransport?.send as
       | ((text: string, attachments: readonly { id: string; path: string }[]) => boolean)
       | undefined
-    expect(send?.('first', [])).toBe(true)
+    await expect(send?.('first', [])).resolves.toBe(true)
     await waitFor(() => expect(mocks.call).toHaveBeenCalledOnce())
 
     // A pending row parks the entry under the backoff instead of re-dispatching
@@ -503,7 +509,7 @@ describe('NativeChatStructuredSession', () => {
       const send = mocks.composerProps?.structuredTransport?.send as
         | ((text: string, attachments: readonly { id: string; path: string }[]) => boolean)
         | undefined
-      expect(send?.('first', [])).toBe(true)
+      await expect(send?.('first', [])).resolves.toBe(true)
 
       // Backoff is 1+2+4+8+16 = 31s for five probes, which was the old hard budget.
       // Step past it; a seventh call proves the probe re-arms instead of giving up.

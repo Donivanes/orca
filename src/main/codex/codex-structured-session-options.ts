@@ -142,6 +142,39 @@ export function readLiveCodexSessionOptions(
   })
 }
 
+export async function validateCodexStructuredSessionInitialOptions(
+  session: CodexSession,
+  options: Readonly<Record<string, string>>,
+  timeoutMs: number | undefined
+): Promise<void> {
+  const requestedModel = options.model
+  if (!requestedModel) {
+    throw new Error('A structured Codex launch requires an initial model.')
+  }
+  const catalog = await readCodexStructuredSessionOptions({
+    connection: session.connection,
+    current: {},
+    timeoutMs
+  })
+  const model = catalog.models.find((entry) => entry.id === requestedModel)
+  if (!model) {
+    throw new Error(`codex app-server does not offer model ${requestedModel}`)
+  }
+  const requestedEffort = options.effort
+  if (
+    requestedEffort &&
+    (!model.efforts.length || !model.efforts.some((entry) => entry.value === requestedEffort))
+  ) {
+    throw new Error(`codex app-server model ${requestedModel} does not support ${requestedEffort}`)
+  }
+  session.options.set('model', requestedModel)
+  if (requestedEffort) {
+    session.options.set('effort', requestedEffort)
+  } else {
+    session.options.delete('effort')
+  }
+}
+
 export async function applyCodexStructuredSessionOption(
   session: CodexSession,
   key: string,

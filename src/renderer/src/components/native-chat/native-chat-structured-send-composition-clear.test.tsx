@@ -82,7 +82,7 @@ function transport(
   overrides: Partial<NativeChatStructuredComposerTransport> = {}
 ): NativeChatStructuredComposerTransport {
   return {
-    send: vi.fn(() => true),
+    send: vi.fn(async () => true),
     dispatchCommand: vi.fn(async () => PASS_THROUGH),
     optionsSurface: {
       getSnapshot: () => [],
@@ -185,7 +185,7 @@ describe('structured send racing the next IME composition', () => {
   // Clearing optimistically before the RPC would lose the draft here, which is why the clear
   // stays on the acceptance path and is instead replayed at settlement.
   it('keeps the draft when the send is rejected', async () => {
-    const structured = transport({ send: vi.fn(() => false) })
+    const structured = transport({ send: vi.fn(async () => false) })
     renderComposer(structured)
     const input = textarea()
 
@@ -200,7 +200,7 @@ describe('structured send racing the next IME composition', () => {
     const dispatch = deferred()
     const structured = transport({
       dispatchCommand: vi.fn(() => dispatch.promise),
-      send: vi.fn(() => false)
+      send: vi.fn(async () => false)
     })
     renderComposer(structured)
     const input = textarea()

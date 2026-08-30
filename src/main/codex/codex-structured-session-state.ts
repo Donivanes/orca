@@ -121,6 +121,12 @@ export class CodexAcquisitionRegistry {
     }
   }
 
+  publishIfCurrent(sessionId: string, attempt: CodexAcquisitionAttempt, publish: () => void): void {
+    this.assertCurrent(sessionId, attempt)
+    publish()
+    this.attempts.delete(sessionId)
+  }
+
   restoreIfCurrent(
     sessionId: string,
     replacement: CodexAcquisitionAttempt,
@@ -132,6 +138,10 @@ export class CodexAcquisitionRegistry {
   }
 
   async closeFailedAttempt(sessionId: string, attempt: CodexAcquisitionAttempt): Promise<boolean> {
+    if (attempt.exitProven) {
+      this.deleteIfCurrent(sessionId, attempt)
+      return true
+    }
     const stopped = (await attempt.window.connection?.close()) ?? true
     if (stopped) {
       attempt.exitProven = true
@@ -161,6 +171,9 @@ export async function cancelCodexAcquisitionAttempt(
     },
     connection: () => attempt.window.connection,
     exitProven: () => attempt.exitProven,
+    markExitProven: () => {
+      attempt.exitProven = true
+    },
     finished: attempt.finished
   })
 }

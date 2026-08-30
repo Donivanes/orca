@@ -17,8 +17,11 @@ export type FullCreationExecutionInput = Pick<
   | 'persistSetupAgentStartupPolicy'
   | 'prepareFullSubmit'
   | 'resolvedInitialWorkspaceStatus'
+  | 'selectedRepoExecutionHostId'
   | 'selectedRepoIsGit'
+  | 'selectedRepoIsRemote'
   | 'setSidebarOpen'
+  | 'settings'
   | 'sparseEnabled'
   | 'taskSourceContext'
   | 'telemetrySource'
@@ -30,11 +33,22 @@ import type { PendingSmartGitHubSubmitResolution } from './source-selection-deci
 import { translate } from '@/i18n/i18n'
 import { settleComposerSubmit } from '@/lib/composer-submit-cancellation'
 import { toFolderWorkspaceLinkedTask } from '@/components/sidebar/folder-workspace-composer-helpers'
-import { renderIssueCommandTemplate, ensureAgentStartupInTerminal } from '@/lib/new-workspace'
-import { createBrowserUuid } from '@/lib/browser-uuid'
 import { activateAndRevealWorktree } from '@/lib/worktree-activation'
-import { seedNativeChatAppliedSessionOptions } from '@/components/native-chat/native-chat-session-option-cache'
 import { queueWorkspaceActivationTerminalFocus } from '@/lib/workspace-activation-terminal-focus'
+import {
+  hasExplicitTuiLaunchCustomization,
+  normalizeStructuredCodexInitialOptions,
+  resolveAgentLaunchRoute
+} from '@/lib/agent-launch-routing'
+import { readLocalRuntimeCapabilities } from '@/runtime/local-runtime-capabilities'
+import { CLIENT_PLATFORM } from '@/lib/new-workspace'
+import { startStructuredCodexLaunch } from '@/lib/structured-agent-session-launch'
+import { StructuredAgentSessionCreateRefusalError } from '@/lib/launch-structured-codex-session'
+import { buildFullCreationStartupPayload } from './full-creation-startup-payload'
+import { continueFullCreationActivation } from './full-creation-post-activation'
+import { focusPublishedStructuredSession } from './full-creation-post-activation'
+import { claimFullCreationStructuredRefusalFallback } from './full-creation-structured-refusal'
+import { buildFullCreationIssueCommand } from './full-creation-issue-command'
 
 export function useFullCreationExecution(input: FullCreationExecutionInput) {
   const {
@@ -53,8 +67,11 @@ export function useFullCreationExecution(input: FullCreationExecutionInput) {
     persistSetupAgentStartupPolicy,
     prepareFullSubmit,
     resolvedInitialWorkspaceStatus,
+    selectedRepoExecutionHostId,
     selectedRepoIsGit,
+    selectedRepoIsRemote,
     setSidebarOpen,
+    settings,
     sparseEnabled,
     taskSourceContext,
     telemetrySource,
@@ -120,6 +137,25 @@ export function useFullCreationExecution(input: FullCreationExecutionInput) {
         return
       }
 
+      const structuredInitialOptions = normalizeStructuredCodexInitialOptions(
+        startupPlan?.sessionOptions
+      )
+      const agentLaunchRoute = resolveAgentLaunchRoute({
+        agent: tuiAgent,
+        settings,
+        executionHostId: selectedRepoExecutionHostId ?? 'local',
+        platform: CLIENT_PLATFORM,
+        hostCapabilities: readLocalRuntimeCapabilities(),
+        workspaceKind: selectedRepoIsGit ? 'git-worktree' : 'folder',
+        promptDelivery: startupPlan?.draftPrompt ? 'draft' : 'auto-submit',
+        launchDraftText: startupPlan?.draftPrompt ?? submitStartupPrompt,
+        nativeChatTranscriptIsLocalReadable: !selectedRepoIsRemote,
+        requiresTuiLaunchCustomization: hasExplicitTuiLaunchCustomization(settings, tuiAgent),
+        initialSessionOptions: structuredInitialOptions
+      })
+      const structuredLaunch = agentLaunchRoute === 'structured-native-chat'
+      const effectiveBackendStartup = structuredLaunch ? undefined : backendStartup
+
       const result = await createWorktree(
         repoId,
         workspaceName,
@@ -142,8 +178,8 @@ export function useFullCreationExecution(input: FullCreationExecutionInput) {
         resolvedInitialWorkspaceStatus,
         smartGitHubResolution.kind === 'none' ? (linkedGitLabMR ?? undefined) : undefined,
         smartGitHubResolution.kind === 'none' ? (linkedGitLabIssue ?? undefined) : undefined,
-        backendStartup,
-        pendingFirstAgentMessageRename,
+        effectiveBackendStartup,
+        structuredLaunch ? false : pendingFirstAgentMessageRename,
         undefined,
         linkedLinearIssueWorkspaceId,
         linkedLinearIssueOrganizationUrlKey,
@@ -155,7 +191,7 @@ export function useFullCreationExecution(input: FullCreationExecutionInput) {
           linkedWorkItem: toFolderWorkspaceLinkedTask(submitLinkedWorkItem),
           linkedTaskSourceContext: taskSourceContext,
           nameWasGenerated,
-          ...(!backendStartup && startupPlan?.draftPrompt
+          ...(!structuredLaunch && !effectiveBackendStartup && startupPlan?.draftPrompt
             ? { startupDraft: startupPlan.draftPrompt }
             : {}),
           ...(parentWorktreeId ? { parentWorktreeId } : {})
@@ -164,26 +200,17 @@ export function useFullCreationExecution(input: FullCreationExecutionInput) {
 
       const worktree = result.worktree
 
-      const trimmedNote = note.trim()
+      await applyWorktreeMeta(worktree.id, note.trim() ? { comment: note.trim() } : {})
 
-      await applyWorktreeMeta(worktree.id, trimmedNote ? { comment: trimmedNote } : {})
-
-      const issueCommand =
-        submitShouldRunIssueAutomation && issueCommandTrustDecision === 'run'
-          ? {
-              command: renderIssueCommandTemplate(confirmedIssueCommandTemplate, {
-                issueNumber: submitLinkedIssueNumber,
-                artifactUrl: submitLinkedWorkItem?.url ?? null
-              })
-            }
-          : undefined
+      const issueCommand = buildFullCreationIssueCommand({
+        enabled: submitShouldRunIssueAutomation,
+        trustDecision: issueCommandTrustDecision,
+        template: confirmedIssueCommandTemplate,
+        issueNumber: submitLinkedIssueNumber,
+        artifactUrl: submitLinkedWorkItem?.url
+      })
 
       const backendSpawnedStartup = result.startupTerminal?.spawned === true
-
-      if (startupPlan && !backendSpawnedStartup && !startupPlan.launchToken) {
-        // Why: delayed delivery must target the exact pane from this queued startup, so both halves share one renderer-session token.
-        startupPlan.launchToken = createBrowserUuid()
-      }
 
       const activation = activateAndRevealWorktree(worktree.id, {
         sidebarRevealBehavior: 'auto',
@@ -191,46 +218,66 @@ export function useFullCreationExecution(input: FullCreationExecutionInput) {
         defaultTabs: result.defaultTabs,
         issueCommand,
         ...(backendSpawnedStartup ? { backendStartupTerminalSpawned: true } : {}),
-        ...(startupPlan && !backendSpawnedStartup
+        ...(structuredLaunch ? { providesInitialSurface: true } : {}),
+        ...(!structuredLaunch
           ? {
-              startup: {
-                command: startupPlan.launchCommand,
-                ...(startupPlan.env ? { env: startupPlan.env } : {}),
-                launchConfig: startupPlan.launchConfig,
-                ...(startupPlan.launchToken ? { launchToken: startupPlan.launchToken } : {}),
-                launchAgent: tuiAgent,
-                ...(startupPlan.draftPrompt ? { draftPrompt: startupPlan.draftPrompt } : {}),
-                ...(startupPlan.startupCommandDelivery
-                  ? { startupCommandDelivery: startupPlan.startupCommandDelivery }
-                  : {}),
-                ...(shouldSeedInitialAgentStatus
-                  ? {
-                      initialAgentStatus: {
-                        agent: tuiAgent,
-                        prompt: submitStartupPrompt.trim()
-                      }
-                    }
-                  : {}),
-                telemetry: composerTelemetry
-              }
+              startup: buildFullCreationStartupPayload({
+                startupPlan,
+                backendSpawnedStartup,
+                tuiAgent,
+                shouldSeedInitialAgentStatus,
+                submitStartupPrompt,
+                composerTelemetry
+              })
             }
           : {})
       })
 
-      if (startupPlan) {
-        const optionScopeKey =
-          (activation !== false ? activation.primaryTabId : null) ?? result.startupTerminal?.tabId
-        if (optionScopeKey) {
-          seedNativeChatAppliedSessionOptions(optionScopeKey, tuiAgent, startupPlan.sessionOptions)
-        }
-      }
+      continueFullCreationActivation({
+        worktreeId: worktree.id,
+        activation,
+        startupPlan,
+        structuredLaunch,
+        backendSpawnedStartup,
+        startupTerminalTabId: result.startupTerminal?.tabId,
+        tuiAgent
+      })
 
-      if (startupPlan && !backendSpawnedStartup) {
-        void ensureAgentStartupInTerminal({
-          worktreeId: worktree.id,
-          primaryTabId: activation === false ? null : activation.primaryTabId,
-          startup: startupPlan
+      if (structuredLaunch && tuiAgent === 'codex') {
+        const launch = startStructuredCodexLaunch(worktree.id, {
+          prompt: startupPlan?.draftPrompt ?? submitStartupPrompt,
+          promptDelivery: startupPlan?.draftPrompt ? 'draft' : 'auto-submit',
+          ...(structuredInitialOptions ? { initialOptions: structuredInitialOptions } : {}),
+          telemetry: composerTelemetry
         })
+        const refusalFallback = claimFullCreationStructuredRefusalFallback(launch, {
+          worktreeId: worktree.id,
+          startupPlan,
+          backendSpawnedStartup,
+          tuiAgent,
+          shouldSeedInitialAgentStatus,
+          submitStartupPrompt,
+          composerTelemetry,
+          ...(pendingFirstAgentMessageRename
+            ? {
+                restorePendingRename: () =>
+                  applyWorktreeMeta(worktree.id, { pendingFirstAgentMessageRename: true }).then(
+                    () => undefined,
+                    () => undefined
+                  )
+              }
+            : {})
+        })
+        try {
+          focusPublishedStructuredSession(worktree.id, (await launch.launchResult).sessionId)
+        } catch (error) {
+          if (!(error instanceof StructuredAgentSessionCreateRefusalError)) {
+            setSidebarOpen(true)
+            onCreated?.()
+            return
+          }
+          await refusalFallback
+        }
       }
 
       setSidebarOpen(true)
@@ -241,7 +288,9 @@ export function useFullCreationExecution(input: FullCreationExecutionInput) {
 
       onCreated?.()
 
-      queueWorkspaceActivationTerminalFocus(worktree.id, activation)
+      if (!structuredLaunch) {
+        queueWorkspaceActivationTerminalFocus(worktree.id, activation)
+      }
     },
     [
       applyWorktreeMeta,
@@ -259,8 +308,11 @@ export function useFullCreationExecution(input: FullCreationExecutionInput) {
       persistSetupAgentStartupPolicy,
       prepareFullSubmit,
       resolvedInitialWorkspaceStatus,
+      selectedRepoExecutionHostId,
       selectedRepoIsGit,
+      selectedRepoIsRemote,
       setSidebarOpen,
+      settings,
       sparseEnabled,
       taskSourceContext,
       telemetrySource,
@@ -268,7 +320,5 @@ export function useFullCreationExecution(input: FullCreationExecutionInput) {
     ]
   )
 
-  return {
-    executeFullCreation
-  }
+  return { executeFullCreation }
 }

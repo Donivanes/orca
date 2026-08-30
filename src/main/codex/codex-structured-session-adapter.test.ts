@@ -10,9 +10,7 @@ import type {
   CodexAppServerLaunch,
   openCodexAppServerConnection
 } from './codex-app-server-connection'
-import type { StructuredAgentSessionEventSink } from '../native-chat/agent-session-wire/structured-agent-session-event-sink'
 import { CODEX_SPAWN_TOKEN_ENV } from './codex-structured-owner-identity'
-import { encodeCodexQuestionOptionId } from './codex-structured-prompt-replies'
 import {
   CodexStructuredSessionAdapter,
   type CodexStructuredLaunch,
@@ -388,6 +386,101 @@ describe('CodexStructuredSessionAdapter.acquire', () => {
     await closing
     expect(codex.connections).toHaveLength(0)
   })
+
+  it('keeps validation-owned acquisition visible to closeAll until publication', async () => {
+    const validation = Promise.withResolvers<unknown>()
+    const validationStarted = Promise.withResolvers<void>()
+    const codex = fakeCodex({
+      'model/list': () => {
+        validationStarted.resolve()
+        return validation.promise
+      }
+    })
+    const adapter = adapterFor(codex)
+    const acquiring = adapter.acquire({
+      identity: identityFor('session-1'),
+      fence: 7,
+      spawnToken: 'spawn-9',
+      validateOptions: true,
+      options: { model: 'gpt-5.6-sol', effort: 'high' }
+    })
+    await validationStarted.promise
+
+    const closing = adapter.closeAll()
+    validation.resolve({
+      data: [
+        {
+          id: 'gpt-5.6-sol',
+          supportedReasoningEfforts: [{ reasoningEffort: 'high' }]
+        }
+      ]
+    })
+
+    await expect(acquiring).rejects.toThrow('exited while being acquired')
+    await closing
+    expect(codex.connections[0]?.closeCount).toBe(1)
+    await expect(
+      adapter.dispatch({
+        sessionId: 'session-1',
+        clientMessageId: 'client-1',
+        body: USER_MESSAGE,
+        fence: 7
+      })
+    ).rejects.toThrow('no live codex app-server')
+  })
+
+  it('does not let late option validation replace a concurrent acquisition owner', async () => {
+    const firstValidation = Promise.withResolvers<unknown>()
+    const firstValidationStarted = Promise.withResolvers<void>()
+    let modelListCalls = 0
+    const codex = fakeCodex({
+      'model/list': () => {
+        modelListCalls += 1
+        if (modelListCalls === 1) {
+          firstValidationStarted.resolve()
+          return firstValidation.promise
+        }
+        return {
+          data: [
+            {
+              id: 'gpt-5.6-sol',
+              supportedReasoningEfforts: [{ reasoningEffort: 'high' }]
+            }
+          ]
+        }
+      }
+    })
+    const adapter = adapterFor(codex)
+    const first = adapter.acquire({
+      identity: identityFor('session-1'),
+      fence: 7,
+      spawnToken: 'spawn-9',
+      validateOptions: true,
+      options: { model: 'gpt-5.6-sol', effort: 'high' }
+    })
+    await firstValidationStarted.promise
+
+    const second = adapter.acquire({
+      identity: identityFor('session-1'),
+      fence: 8,
+      spawnToken: 'spawn-10',
+      validateOptions: true,
+      options: { model: 'gpt-5.6-sol', effort: 'high' }
+    })
+    firstValidation.resolve({
+      data: [
+        {
+          id: 'gpt-5.6-sol',
+          supportedReasoningEfforts: [{ reasoningEffort: 'high' }]
+        }
+      ]
+    })
+
+    await expect(first).rejects.toThrow(/(exited|superseded) while being acquired/)
+    await expect(second).resolves.toMatchObject({ link: { mintedAtFence: 8 } })
+    await adapter.closeAll()
+    expect(codex.connections.map((connection) => connection.closeCount)).toEqual([1, 1])
+  })
 })
 
 describe('CodexStructuredSessionAdapter.dispatch', () => {
@@ -576,308 +669,5 @@ describe('CodexStructuredSessionAdapter.dispatch', () => {
     const turnStart = codex.connections[0].calls.findLast((call) => call.method === 'turn/start')
     expect(turnStart?.params).toMatchObject({ model: 'gpt-5', effort: 'high' })
     expect(turnStart?.params).not.toHaveProperty('sandboxEscape')
-  })
-})
-
-describe('CodexStructuredSessionAdapter prompts', () => {
-  function askApproval(codex: ReturnType<typeof fakeCodex>): void {
-    codex.connections[0].handlers.onServerRequest?.({
-      id: 11,
-      method: 'item/commandExecution/requestApproval',
-      params: { itemId: 'codex-item-1', threadId: THREAD_ID, turnId: 'turn-1' }
-    })
-  }
-
-  it('surfaces an approval request and answers it exactly once', async () => {
-    const codex = fakeCodex()
-    const events: CodexStructuredSessionEvent[] = []
-    const adapter = await acquired(codex, {}, events)
-
-    askApproval(codex)
-    adapter.bindPromptItemId('session-1', 'codex:thread-abc:turn-1:3', 'codex-item-1')
-    await adapter.answerPrompt({
-      sessionId: 'session-1',
-      itemId: 'codex:thread-abc:turn-1:3',
-      kind: 'approval',
-      optionId: 'accept',
-      fence: 7
-    })
-
-    expect(events.at(-1)).toMatchObject({ type: 'prompt', codexItemId: 'codex-item-1' })
-    expect(codex.connections[0].replies).toEqual([{ id: 11, result: { decision: 'accept' } }])
-
-    await expect(
-      adapter.answerPrompt({
-        sessionId: 'session-1',
-        itemId: 'codex:thread-abc:turn-1:3',
-        kind: 'approval',
-        optionId: 'decline',
-        fence: 7
-      })
-    ).rejects.toThrow('no longer waiting on')
-    expect(codex.connections[0].replies).toHaveLength(1)
-  })
-
-  it('answers each approval a tool item asks for separately', async () => {
-    const codex = fakeCodex()
-    const events: CodexStructuredSessionEvent[] = []
-    const adapter = await acquired(codex, {}, events)
-    // A shell bridge re-asks per command under one parent tool item, so only the
-    // approval id tells the two requests apart.
-    const ask = (id: number, approvalId: string): void => {
-      codex.connections[0].handlers.onServerRequest?.({
-        id,
-        method: 'item/commandExecution/requestApproval',
-        params: { itemId: 'codex-item-1', approvalId, threadId: THREAD_ID, turnId: 'turn-1' }
-      })
-    }
-
-    ask(11, 'approval-a')
-    ask(12, 'approval-b')
-    adapter.bindPromptItemId('session-1', 'journal-a', 'approval-a')
-    adapter.bindPromptItemId('session-1', 'journal-b', 'approval-b')
-    for (const [itemId, optionId] of [
-      ['journal-b', 'decline'],
-      ['journal-a', 'accept']
-    ]) {
-      await adapter.answerPrompt({
-        sessionId: 'session-1',
-        itemId,
-        kind: 'approval',
-        optionId,
-        fence: 7
-      })
-    }
-
-    expect(codex.connections[0].replies).toEqual([
-      { id: 12, result: { decision: 'decline' } },
-      { id: 11, result: { decision: 'accept' } }
-    ])
-    expect(events.map((event) => (event.type === 'prompt' ? event.promptKey : null))).toEqual([
-      'approval-a',
-      'approval-b'
-    ])
-  })
-
-  it('rejects an option id that is not a Codex decision', async () => {
-    const codex = fakeCodex()
-    const adapter = await acquired(codex)
-
-    askApproval(codex)
-
-    await expect(
-      adapter.answerPrompt({
-        sessionId: 'session-1',
-        itemId: 'codex-item-1',
-        kind: 'approval',
-        optionId: 'yolo',
-        fence: 7
-      })
-    ).rejects.toThrow('is not a Codex approval decision')
-    expect(codex.connections[0].replies).toEqual([])
-  })
-
-  it('holds a multi-question request until every question is answered', async () => {
-    const codex = fakeCodex()
-    const adapter = await acquired(codex)
-    codex.connections[0].handlers.onServerRequest?.({
-      id: 12,
-      method: 'item/tool/requestUserInput',
-      params: {
-        itemId: 'codex-item-2',
-        threadId: THREAD_ID,
-        turnId: 'turn-1',
-        questions: [{ id: 'q1' }, { id: 'q2' }]
-      }
-    })
-
-    await adapter.answerPrompt({
-      sessionId: 'session-1',
-      itemId: 'codex-item-2',
-      kind: 'question',
-      optionId: encodeCodexQuestionOptionId('q1', 'yes'),
-      fence: 7
-    })
-    expect(codex.connections[0].replies).toEqual([])
-
-    await adapter.answerPrompt({
-      sessionId: 'session-1',
-      itemId: 'codex-item-2',
-      kind: 'question',
-      optionId: encodeCodexQuestionOptionId('q2', 'no'),
-      fence: 7
-    })
-
-    expect(codex.connections[0].replies).toEqual([
-      { id: 12, result: { answers: { q1: { answers: ['yes'] }, q2: { answers: ['no'] } } } }
-    ])
-  })
-
-  it('declines MCP elicitation and journals the explicit disposition', async () => {
-    const codex = fakeCodex()
-    const events: CodexStructuredSessionEvent[] = []
-    await acquired(codex, {}, events)
-
-    codex.connections[0].handlers.onServerRequest?.({
-      id: 13,
-      method: 'mcpServer/elicitation/request',
-      params: { itemId: 'codex-item-3', threadId: THREAD_ID }
-    })
-
-    expect(codex.connections[0].replies).toEqual([
-      { id: 13, result: { action: 'decline', content: null, _meta: null } }
-    ])
-    expect(events.some((event) => event.type === 'prompt')).toBe(false)
-  })
-
-  it('surfaces an answer to a prompt Codex already forgot', async () => {
-    const codex = fakeCodex()
-    const adapter = await acquired(codex)
-
-    await expect(
-      adapter.answerPrompt({
-        sessionId: 'session-1',
-        itemId: 'codex-item-gone',
-        kind: 'approval',
-        optionId: 'accept',
-        fence: 7
-      })
-    ).rejects.toThrow('no longer waiting on codex-item-gone')
-  })
-})
-
-describe('CodexStructuredSessionAdapter lifecycle', () => {
-  it('keeps sessions isolated and closes each child once', async () => {
-    const codex = fakeCodex()
-    const adapter = adapterFor(codex)
-    await adapter.acquire({ identity: identityFor('session-1'), fence: 1, spawnToken: 'spawn-a' })
-    await adapter.acquire({ identity: identityFor('session-2'), fence: 1, spawnToken: 'spawn-b' })
-
-    codex.connections[0].handlers.onServerRequest?.({
-      id: 21,
-      method: 'item/fileChange/requestApproval',
-      params: { itemId: 'codex-item-1', threadId: THREAD_ID, turnId: 'turn-1' }
-    })
-    await expect(
-      adapter.answerPrompt({
-        sessionId: 'session-2',
-        itemId: 'codex-item-1',
-        kind: 'approval',
-        optionId: 'accept',
-        fence: 1
-      })
-    ).rejects.toThrow('no longer waiting on')
-
-    await adapter.closeAll()
-    expect(codex.connections.map((connection) => connection.closeCount)).toEqual([1, 1])
-    await expect(
-      adapter.cancelTurn({ sessionId: 'session-1', turnId: 'turn-1', fence: 1 })
-    ).rejects.toThrow('no live codex app-server for session session-1')
-  })
-
-  it('retains ownership until a child exit is proven and reports it once', async () => {
-    const codex = fakeCodex()
-    const events: CodexStructuredSessionEvent[] = []
-    const adapter = await acquired(codex, {}, events)
-
-    const connection = codex.connections[0]
-    connection.close = async () => {
-      connection.closeCount += 1
-      return false
-    }
-    connection.handlers.onExit?.(new Error('codex app-server connection ended'))
-
-    expect(events.at(-1)).toEqual({
-      type: 'ended',
-      sessionId: 'session-1',
-      reason: 'codex app-server connection ended'
-    })
-    await expect(
-      adapter.dispatch({
-        sessionId: 'session-1',
-        clientMessageId: 'client-1',
-        body: USER_MESSAGE,
-        fence: 7
-      })
-    ).rejects.toThrow('no live codex app-server')
-    expect(await adapter.historyFilePath({ identity: identityFor('session-1') })).toBe(
-      '/rollouts/abc.jsonl'
-    )
-    await expect(adapter.closeSession('session-1')).resolves.toBe(false)
-    expect(events.filter((event) => event.type === 'ended')).toHaveLength(1)
-  })
-
-  it('keeps the live session when a child it already replaced dies', async () => {
-    const codex = fakeCodex()
-    const events: CodexStructuredSessionEvent[] = []
-    const adapter = await acquired(codex, {}, events)
-    await adapter.acquire({ identity: identityFor('session-1'), fence: 8, spawnToken: 'spawn-10' })
-    const endedBeforeStaleExit = events.filter((event) => event.type === 'ended').length
-
-    codex.connections[0].handlers.onExit?.(new Error('the superseded child died'))
-
-    expect(events.filter((event) => event.type === 'ended')).toHaveLength(endedBeforeStaleExit)
-    expect(await adapter.historyFilePath({ identity: identityFor('session-1') })).toBe(
-      '/rollouts/abc.jsonl'
-    )
-  })
-
-  it('ignores Codex traffic that arrives after the session is gone', async () => {
-    const codex = fakeCodex()
-    const adapter = await acquired(codex)
-    const connection = codex.connections[0]
-
-    await adapter.closeSession('session-1')
-    connection.handlers.onNotification?.('item/agentMessage/delta', { delta: 'x' })
-    connection.handlers.onServerRequest?.({
-      id: 31,
-      method: 'item/fileChange/requestApproval',
-      params: { itemId: 'codex-item-9', threadId: THREAD_ID }
-    })
-
-    expect(connection.replies).toEqual([])
-  })
-
-  it('flushes the final coalesced text before a graceful close', async () => {
-    const codex = fakeCodex()
-    const bodies: AgentJournalMessageItem[] = []
-    const tombstones: unknown[] = []
-    const sink: StructuredAgentSessionEventSink = {
-      appendItem: (_identity, body) => {
-        if (body.kind === 'message') {
-          bodies.push(body)
-        }
-      },
-      appendTombstone: (identity) => tombstones.push(identity),
-      publish: () => {}
-    }
-    const adapter = adapterFor(codex)
-    await adapter.acquire({
-      identity: identityFor('session-1'),
-      fence: 7,
-      spawnToken: 'spawn-9',
-      events: sink
-    })
-    const notify = codex.connections[0]!.handlers.onNotification
-    notify?.('turn/started', { threadId: THREAD_ID, turn: { id: 'turn-1' } })
-    notify?.('item/started', {
-      threadId: THREAD_ID,
-      item: { type: 'agentMessage', id: 'item-1', text: '' }
-    })
-    notify?.('item/agentMessage/delta', {
-      threadId: THREAD_ID,
-      itemId: 'item-1',
-      delta: 'last words'
-    })
-
-    await adapter.closeSession('session-1')
-
-    expect(bodies.at(-1)?.blocks).toEqual([{ type: 'text', text: 'last words' }])
-    expect(tombstones).toContainEqual({
-      provider: 'legacy',
-      agent: 'codex',
-      sessionId: 'session-1',
-      recordId: 'turn-lifecycle:turn-1'
-    })
   })
 })

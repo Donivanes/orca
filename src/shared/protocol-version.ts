@@ -123,6 +123,14 @@ export const AGENT_SESSION_OMP_RESUME_PATH_RUNTIME_CAPABILITY =
 // can neither display nor drive. The host also refuses every agentSession.*
 // method from a connection that does not advertise this.
 export const STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY = 'agent-session.structured.v1' as const
+// Provider-specific proof keeps a new client from routing into an adapter an
+// older or partially upgraded host does not install.
+export const STRUCTURED_CODEX_SESSION_RUNTIME_CAPABILITY =
+  'agent-session.structured.codex.v1' as const
+// Why: older structured hosts strip create-time options, so a client with a persisted model must
+// not dispatch until the host proves it can pin those options before the first turn.
+export const STRUCTURED_AGENT_SESSION_INITIAL_OPTIONS_RUNTIME_CAPABILITY =
+  'agent-session.structured.initial-options.v1' as const
 // Why: paired structured clients explicitly hold every visible session surface, allowing the host
 // to stop provider children after the last surface closes without tying lifetime to a transport.
 export const STRUCTURED_AGENT_SESSION_HOLD_RUNTIME_CAPABILITY =
@@ -221,6 +229,8 @@ export const RUNTIME_CAPABILITIES = [
   AGENT_SESSION_HOST_AUTHORITY_RUNTIME_CAPABILITY,
   AGENT_SESSION_OMP_RESUME_PATH_RUNTIME_CAPABILITY,
   STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
+  STRUCTURED_CODEX_SESSION_RUNTIME_CAPABILITY,
+  STRUCTURED_AGENT_SESSION_INITIAL_OPTIONS_RUNTIME_CAPABILITY,
   STRUCTURED_AGENT_SESSION_HOLD_RUNTIME_CAPABILITY,
   AGENT_SESSION_KIMI_RESUME_RUNTIME_CAPABILITY,
   FILE_MUTATION_OWNERSHIP_RUNTIME_CAPABILITY,

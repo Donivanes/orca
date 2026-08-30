@@ -1,10 +1,19 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { getDefaultOnboardingState, getDefaultSettings } from '../../../../shared/constants'
 import {
   buildDismissedOnboardingFolderAgentStartup,
   buildOnboardingFolderAgentStartup,
+  resolveDismissedOnboardingFolderAgentLaunch,
   shouldSeedFolderAgentAfterDismissedOnboarding
 } from '@/lib/onboarding-folder-agent-startup'
+
+vi.mock('@/runtime/local-runtime-capabilities', () => ({
+  readLocalRuntimeCapabilities: () => [
+    'agent-session.structured.v1',
+    'agent-session.structured.codex.v1',
+    'agent-session.structured.initial-options.v1'
+  ]
+}))
 
 describe('buildOnboardingFolderAgentStartup', () => {
   it('queues the persisted default agent with onboarding telemetry', () => {
@@ -152,5 +161,48 @@ describe('buildOnboardingFolderAgentStartup', () => {
         request_kind: 'new'
       }
     })
+  })
+
+  it('routes dismissed-onboarding local Codex startup to structured native chat', () => {
+    const launch = resolveDismissedOnboardingFolderAgentLaunch({
+      settings: {
+        ...getDefaultSettings('/tmp/orca-workspaces'),
+        defaultTuiAgent: 'codex',
+        experimentalNativeChat: true,
+        experimentalStructuredNativeChat: true,
+        openAgentTabsInChatByDefault: true
+      },
+      onboarding: { ...getDefaultOnboardingState(), outcome: 'dismissed' },
+      hasExistingProject: false,
+      executionHostId: 'local'
+    })
+
+    expect(launch).toMatchObject({
+      agent: 'codex',
+      route: 'structured-native-chat',
+      structuredTelemetry: {
+        agent_kind: 'codex',
+        launch_source: 'onboarding',
+        request_kind: 'new'
+      }
+    })
+  })
+
+  it('preserves dismissed-onboarding terminal startup when restructure is off', () => {
+    const launch = resolveDismissedOnboardingFolderAgentLaunch({
+      settings: {
+        ...getDefaultSettings('/tmp/orca-workspaces'),
+        defaultTuiAgent: 'codex',
+        experimentalNativeChat: true,
+        experimentalStructuredNativeChat: false,
+        openAgentTabsInChatByDefault: true
+      },
+      onboarding: { ...getDefaultOnboardingState(), outcome: 'dismissed' },
+      hasExistingProject: false,
+      executionHostId: 'local'
+    })
+
+    expect(launch.route).toBe('legacy-native-chat')
+    expect(launch.startup?.launchAgent).toBe('codex')
   })
 })

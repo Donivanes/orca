@@ -6,6 +6,7 @@ export async function cancelProcessAcquisition(input: {
   cancel: () => void
   connection: () => ExitProvenConnection | null
   exitProven: () => boolean
+  markExitProven: () => void
   finished: Promise<void>
 }): Promise<boolean> {
   input.cancel()
@@ -14,6 +15,7 @@ export async function cancelProcessAcquisition(input: {
     if ((await connectionBeforeFinish.close()) !== true) {
       return false
     }
+    input.markExitProven()
   }
   await input.finished
   if (input.exitProven()) {
@@ -23,5 +25,9 @@ export async function cancelProcessAcquisition(input: {
   if (!connectionAfterFinish || connectionAfterFinish === connectionBeforeFinish) {
     return true
   }
-  return (await connectionAfterFinish.close()) === true
+  if ((await connectionAfterFinish.close()) !== true) {
+    return false
+  }
+  input.markExitProven()
+  return true
 }

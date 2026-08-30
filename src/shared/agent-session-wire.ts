@@ -179,6 +179,8 @@ export type AgentSessionWireRefusalCode = (typeof AGENT_SESSION_WIRE_REFUSAL_COD
 export type AgentSessionWireRefusal = {
   code: AgentSessionWireRefusalCode
   message: string
+  /** Additive create-only proof that no provider/session ownership was acquired. */
+  acquisitionState?: 'not-acquired'
   /** On a stale fence, so the client can retry without another round trip. */
   currentFence?: number
   /** On a lost compare-and-set: the winning answer and who gave it. */

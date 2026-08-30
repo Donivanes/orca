@@ -174,6 +174,19 @@ export class AgentSessionRecordStore {
         throw new Error(decision.code)
       }
       if (decision.decision === 'replay') {
+        if (
+          decision.row.outcome.status === 'pending' &&
+          !this.state.records.has(request.sessionId) &&
+          request.expectedFence === null
+        ) {
+          const result = applyAgentSessionReservation(
+            this.state,
+            request,
+            AGENT_SESSION_LEASE_TTL_MS
+          )
+          this.state.records.set(result.record.sessionId, result.record)
+          return { ...result, operationRow: decision.row }
+        }
         let record = requireAgentSessionRecordForReplay(this.state, decision.row, request.sessionId)
         if (decision.row.outcome.status === 'pending' && request.handoffOperationId !== null) {
           record = admitPendingAgentSessionReservationReplay(record, request)

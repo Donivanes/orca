@@ -11,6 +11,13 @@ const { mockGetRendererAppPlatform } = vi.hoisted(() => ({
 vi.mock('@/lib/renderer-app-platform', () => ({
   getRendererAppPlatform: mockGetRendererAppPlatform
 }))
+vi.mock('@/runtime/local-runtime-capabilities', () => ({
+  readLocalRuntimeCapabilities: () => [
+    'agent-session.structured.v1',
+    'agent-session.structured.codex.v1',
+    'agent-session.structured.initial-options.v1'
+  ]
+}))
 
 type GetLocalProjectExecutionRuntimeContext =
   typeof localPreflightContext.getLocalProjectExecutionRuntimeContext
@@ -67,7 +74,11 @@ function stateFor(input: {
       }
     ],
     repos: [{ id: 'repo-1', connectionId: input.connectionId ?? null, path: 'C:\\repo' }],
-    settings: { experimentalStructuredNativeChat: true, openAgentTabsInChatByDefault: true },
+    settings: {
+      experimentalNativeChat: true,
+      experimentalStructuredNativeChat: true,
+      openAgentTabsInChatByDefault: true
+    },
     worktreesByRepo: {
       'repo-1': [
         {

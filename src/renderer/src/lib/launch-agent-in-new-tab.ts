@@ -3,7 +3,6 @@ import type { AgentStartupPlan } from '@/lib/tui-agent-startup'
 import { planLaunchAgentStartupPrompt } from '@/lib/launch-agent-startup-prompt-plan'
 import { CLIENT_PLATFORM } from '@/lib/new-workspace'
 import { getAgentLaunchPlatformForRepo } from '@/lib/agent-launch-platform'
-import { reconcileTabOrder } from '@/components/tab-bar/reconcile-order'
 import { tuiAgentToAgentKind } from '@/lib/telemetry'
 import { createPasteReadinessTimeoutNotice } from '@/lib/launch-agent-paste-timeout-notice'
 import {
@@ -12,7 +11,10 @@ import {
 } from '@/lib/agent-launch-prompt-delivery'
 import { initialAgentTabViewModeProps } from '@/lib/native-chat-initial-view-mode'
 import { isNativeChatTranscriptLocalReadable } from '@/lib/native-chat-transcript-readability'
-import { getRuntimeEnvironmentIdForWorktree } from '@/lib/worktree-runtime-owner'
+import {
+  getExecutionHostIdForWorktree,
+  getRuntimeEnvironmentIdForWorktree
+} from '@/lib/worktree-runtime-owner'
 import { getLocalProjectExecutionRuntimeContext } from '@/lib/local-preflight-context'
 import { isWebRuntimeSessionActive } from '@/runtime/web-runtime-session'
 import { launchAgentInWebHostTab } from '@/lib/launch-agent-web-host-tab'
@@ -29,8 +31,16 @@ import type { LaunchSource } from '../../../shared/telemetry-events'
 import { getConnectionIdFromState } from '@/lib/connection-context'
 import { resolveInitialNativeChatSessionOptions } from '@/components/native-chat/native-chat-launch-session-options'
 import { seedNativeChatAppliedSessionOptions } from '@/components/native-chat/native-chat-session-option-cache'
-import { canUseStructuredNativeChat } from '@/lib/structured-native-chat-availability'
 import { startStructuredCodexLaunch } from '@/lib/structured-agent-session-launch'
+import {
+  hasExplicitTuiLaunchCustomization,
+  hasSemanticallyNonEmptyAgentArgs,
+  normalizeStructuredCodexInitialOptions,
+  resolveAgentLaunchRoute
+} from '@/lib/agent-launch-routing'
+import { readLocalRuntimeCapabilities } from '@/runtime/local-runtime-capabilities'
+import { FLOATING_TERMINAL_WORKTREE_ID } from '../../../shared/constants'
+import { appendLaunchedTabToOrder } from './launch-agent-tab-order'
 
 export type LaunchAgentInNewTabArgs = {
   agent: TuiAgent
@@ -79,7 +89,10 @@ export function shouldQueueTerminalFocusAfterMenuClose(
  *
  * Returns `null` when no startup plan can be built (e.g. a whitespace-only prompt).
  */
-export function launchAgentInNewTab(args: LaunchAgentInNewTabArgs): LaunchAgentInNewTabResult {
+function launchAgentInNewTabInternal(
+  args: LaunchAgentInNewTabArgs,
+  forceLegacy = false
+): LaunchAgentInNewTabResult {
   const {
     agent,
     worktreeId,
@@ -183,18 +196,60 @@ export function launchAgentInNewTab(args: LaunchAgentInNewTabArgs): LaunchAgentI
     }
   }
 
-  const launchDirectStructuredChat =
-    agent === 'codex' &&
-    !hasPrompt &&
-    store.settings?.experimentalNativeChat === true &&
-    canUseStructuredNativeChat(store, worktreeId)
-  if (launchDirectStructuredChat) {
-    startStructuredCodexLaunch(worktreeId)
+  const workspaceKind =
+    worktreeId === FLOATING_TERMINAL_WORKTREE_ID
+      ? 'floating'
+      : worktreeId.startsWith('folder:')
+        ? 'folder'
+        : 'git-worktree'
+  const structuredInitialOptions = normalizeStructuredCodexInitialOptions(
+    startupPlan.sessionOptions
+  )
+  const launchRoute = forceLegacy
+    ? 'legacy-native-chat'
+    : resolveAgentLaunchRoute({
+        agent,
+        settings: store.settings,
+        executionHostId: getExecutionHostIdForWorktree(store, worktreeId),
+        platform: CLIENT_PLATFORM,
+        hostCapabilities: readLocalRuntimeCapabilities(),
+        workspaceKind,
+        projectRuntime: getLocalProjectExecutionRuntimeContext(store, worktreeId),
+        promptDelivery: viewModePromptDelivery,
+        launchDraftText: trimmedPrompt,
+        nativeChatTranscriptIsLocalReadable:
+          initialViewModeOptions.nativeChatTranscriptIsLocalReadable,
+        requiresTuiLaunchCustomization:
+          Boolean(initialCwd?.trim()) ||
+          hasSemanticallyNonEmptyAgentArgs(agentArgs) ||
+          hasExplicitTuiLaunchCustomization(store.settings, agent),
+        initialSessionOptions: structuredInitialOptions
+      })
+  if (launchRoute === 'structured-native-chat' && agent === 'codex') {
+    const structuredLaunch = startStructuredCodexLaunch(worktreeId, {
+      prompt: trimmedPrompt,
+      promptDelivery,
+      onPromptDelivered,
+      ...(structuredInitialOptions ? { initialOptions: structuredInitialOptions } : {}),
+      telemetry: {
+        agent_kind: 'codex',
+        launch_source: launchSource ?? 'tab_bar_quick_launch',
+        request_kind: 'new'
+      }
+    })
+    void structuredLaunch
+      .claimDefinitiveRefusalFallback(() => {
+        launchAgentInNewTabInternal(args, true)
+      })
+      .catch((error) => console.error('Structured Codex fallback failed', error))
     return {
       tabId: null,
       startupPlan,
       pasteDraftAfterLaunch: false,
-      focusAfterMenuClose: 'structured-session'
+      focusAfterMenuClose: 'structured-session',
+      ...(promptDelivery === 'submit-after-ready' && structuredLaunch.promptDeliveryResult
+        ? { promptDeliveryResult: structuredLaunch.promptDeliveryResult }
+        : {})
     }
   }
 
@@ -275,20 +330,8 @@ export function launchAgentInNewTab(args: LaunchAgentInNewTabArgs): LaunchAgentI
   // Why: without setActiveTabType('terminal') a worktree showing an editor keeps rendering it and the new tab stays hidden.
   store.setActiveTabType('terminal')
 
-  // Why: persist tab-bar order so reconcileTabOrder doesn't fall back to terminals-first and jump the new tab to index 0.
   const fresh = useAppStore.getState()
-  const termIds = (fresh.tabsByWorktree[worktreeId] ?? []).map((t) => t.id)
-  const editorIds = fresh.openFiles.filter((f) => f.worktreeId === worktreeId).map((f) => f.id)
-  const browserIds = (fresh.browserTabsByWorktree?.[worktreeId] ?? []).map((t) => t.id)
-  const base = reconcileTabOrder(
-    fresh.tabBarOrderByWorktree[worktreeId],
-    termIds,
-    editorIds,
-    browserIds
-  )
-  const order = base.filter((id) => id !== tab.id)
-  order.push(tab.id)
-  fresh.setTabBarOrder(worktreeId, order)
+  appendLaunchedTabToOrder(fresh, worktreeId, tab.id)
 
   return {
     tabId: tab.id,
@@ -297,3 +340,5 @@ export function launchAgentInNewTab(args: LaunchAgentInNewTabArgs): LaunchAgentI
     ...(promptDeliveryResult ? { promptDeliveryResult } : {})
   }
 }
+
+export const launchAgentInNewTab = launchAgentInNewTabInternal

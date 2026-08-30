@@ -71,6 +71,61 @@ describe('runSourceControlAgentActionStart', () => {
     expect(mocks.toastError).not.toHaveBeenCalled()
   })
 
+  it('keeps distinct concurrent source-control launch settlements independent', async () => {
+    const firstDelivery = Promise.withResolvers<{
+      delivered: boolean
+      failureNotified: boolean
+    }>()
+    const secondDelivery = Promise.withResolvers<{
+      delivered: boolean
+      failureNotified: boolean
+    }>()
+    mocks.launchAgentInNewTab
+      .mockReturnValueOnce({
+        tabId: null,
+        startupPlan: {} as never,
+        pasteDraftAfterLaunch: false,
+        promptDeliveryResult: firstDelivery.promise
+      })
+      .mockReturnValueOnce({
+        tabId: null,
+        startupPlan: {} as never,
+        pasteDraftAfterLaunch: false,
+        promptDeliveryResult: secondDelivery.promise
+      })
+    const firstLaunched = vi.fn()
+    const secondLaunched = vi.fn()
+    const firstClose = vi.fn()
+    const secondClose = vi.fn()
+
+    const first = runSourceControlAgentActionStart(
+      buildArgs({
+        trimmedCommandInput: 'Fix the first review comment',
+        onLaunched: firstLaunched,
+        onClose: firstClose
+      })
+    )
+    const second = runSourceControlAgentActionStart(
+      buildArgs({
+        trimmedCommandInput: 'Fix the second review comment',
+        onLaunched: secondLaunched,
+        onClose: secondClose
+      })
+    )
+
+    secondDelivery.resolve({ delivered: false, failureNotified: true })
+    firstDelivery.resolve({ delivered: true, failureNotified: false })
+    await expect(Promise.all([first, second])).resolves.toEqual([true, false])
+    expect(firstLaunched).toHaveBeenCalledOnce()
+    expect(firstClose).toHaveBeenCalledOnce()
+    expect(secondLaunched).not.toHaveBeenCalled()
+    expect(secondClose).not.toHaveBeenCalled()
+    expect(mocks.launchAgentInNewTab.mock.calls.map(([args]) => args.prompt)).toEqual([
+      'Fix the first review comment',
+      'Fix the second review comment'
+    ])
+  })
+
   it('notifies onLaunchAccepted as soon as the agent tab is created, before prompt delivery', async () => {
     let resolveDelivery: (value: {
       delivered: boolean

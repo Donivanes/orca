@@ -16,11 +16,19 @@ import {
   resolveWebSessionVisibleTabId
 } from '@/runtime/web-session-focus-intent'
 import { LOCAL_STRUCTURED_SESSION_OWNER } from '@/runtime/local-structured-session-tabs-sync'
+import type { AgentStartedTelemetry } from '@/lib/worktree-startup-payload'
+
+export type StructuredCodexInitialOptions = {
+  model: string
+  effort?: string
+}
 
 type StructuredAgentSessionCreateParams = {
   envelope: AgentSessionMutationEnvelope
   worktree: string
   agent: 'codex'
+  initialOptions?: StructuredCodexInitialOptions
+  telemetry?: AgentStartedTelemetry
 }
 
 export type StructuredAgentSessionLaunchIntent = {
@@ -32,10 +40,19 @@ export type StructuredAgentSessionLaunchIntent = {
 export class StructuredAgentSessionCreateRefusalError extends Error {}
 
 export function createStructuredCodexSessionLaunchIntent(
-  worktreeId: string
+  worktreeId: string,
+  options: {
+    initialOptions?: StructuredCodexInitialOptions
+    telemetry?: AgentStartedTelemetry
+  } = {}
 ): StructuredAgentSessionLaunchIntent {
   const sessionId = `codex_${crypto.randomUUID().replaceAll('-', '_')}`
-  const fields = { worktree: toRuntimeWorktreeSelector(worktreeId), agent: 'codex' as const }
+  const fields = {
+    worktree: toRuntimeWorktreeSelector(worktreeId),
+    agent: 'codex' as const,
+    ...(options.initialOptions ? { initialOptions: options.initialOptions } : {}),
+    ...(options.telemetry ? { telemetry: options.telemetry } : {})
+  }
   const state = useAppStore.getState()
   recordWebSessionFocusIntent(
     { environmentId: LOCAL_STRUCTURED_SESSION_OWNER },
@@ -75,13 +92,16 @@ export function abandonStructuredAgentSessionLaunchIntent(
 
 export async function launchStructuredCodexSession(
   intent: StructuredAgentSessionLaunchIntent
-): Promise<string> {
+): Promise<AgentSessionAttachResult> {
   const result = await callStructuredAgentSession<
     AgentSessionMutationResult<AgentSessionAttachResult>
   >({ kind: 'local' }, 'agentSession.create', intent.params)
   if (!result.ok) {
-    abandonStructuredAgentSessionLaunchIntent(intent)
-    throw new StructuredAgentSessionCreateRefusalError(result.refusal.message)
+    if (result.refusal.acquisitionState === 'not-acquired') {
+      abandonStructuredAgentSessionLaunchIntent(intent)
+      throw new StructuredAgentSessionCreateRefusalError(result.refusal.message)
+    }
+    throw new Error(result.refusal.message)
   }
-  return result.value.sessionId
+  return result.value
 }

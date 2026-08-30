@@ -11,8 +11,6 @@ import type {
   AgentSessionOptionsResult,
   AgentSessionWireRefusal
 } from '../../../shared/agent-session-wire'
-import type { AgentSessionAttachParams } from './structured-agent-session-attach'
-import { AGENT_SESSION_NOT_ATTACHED } from './structured-agent-session-mutation-admission'
 import { createRestartReconciler } from './structured-agent-session-restart-reconcile'
 import {
   AgentSessionSubscribers,
@@ -55,6 +53,13 @@ import type {
   StructuredAgentSessionHostSession
 } from './structured-agent-session-host-types'
 import { readStructuredAgentSessionHistoryResult } from './structured-agent-session-history-result'
+import {
+  admitOrReplayCreateIntent,
+  releaseCreateIntentAdmission,
+  requireStructuredSession,
+  settleCreateIntentRefusal
+} from './structured-agent-session-host-create-intent'
+import type { AgentSessionAttachParams } from './structured-agent-session-attach'
 export type { StructuredAgentSessionHostDeps } from './structured-agent-session-host-types'
 
 export class StructuredAgentSessionHost {
@@ -67,6 +72,7 @@ export class StructuredAgentSessionHost {
   private readonly readableRestorer: StructuredAgentSessionReadableRestorer
   private readonly restartRestore = new StructuredAgentSessionRestartRestoreGate()
   private readonly holds: StructuredAgentSessionHolds
+  private readonly activeCreateIntents = new Set<string>()
 
   constructor(readonly deps: StructuredAgentSessionHostDeps) {
     this.runtimeState = new StructuredAgentSessionHostRuntimeState(
@@ -114,6 +120,9 @@ export class StructuredAgentSessionHost {
   private now = (): number => this.deps.now?.() ?? Date.now()
 
   hasSession = (sessionId: string): boolean => this.sessions.has(sessionId)
+
+  executionLocationForSession = (sessionId: string): AgentSessionExecutionLocation | null =>
+    this.deps.store.getRecord(sessionId)?.location ?? null
 
   /** A surface bound to this session and wants it live. The FIRST hold on a session with no
    *  provider child is what resumes one; a retained hold (a subscription) only keeps it. */
@@ -220,6 +229,33 @@ export class StructuredAgentSessionHost {
     return attachStructuredAgentSession(this.attachContext(), caller.callerKey, params)
   }
 
+  admitOrReplayCreateIntent = (
+    caller: StructuredAgentSessionCaller,
+    envelope: Parameters<typeof admitOrReplayCreateIntent>[2]
+  ) => admitOrReplayCreateIntent(this.createIntentContext(), caller, envelope)
+
+  settleCreateIntentRefusal = (
+    caller: StructuredAgentSessionCaller,
+    envelope: Parameters<typeof settleCreateIntentRefusal>[2],
+    refusal: Parameters<typeof settleCreateIntentRefusal>[3]
+  ) => settleCreateIntentRefusal(this.createIntentContext(), caller, envelope, refusal)
+
+  releaseCreateIntentAdmission = (
+    caller: StructuredAgentSessionCaller,
+    envelope: Parameters<typeof releaseCreateIntentAdmission>[2]
+  ): void => releaseCreateIntentAdmission(this.createIntentContext(), caller, envelope)
+
+  private createIntentContext() {
+    return {
+      deps: this.deps,
+      sessions: this.sessions,
+      activeCreateIntents: this.activeCreateIntents,
+      now: this.now,
+      attach: (caller: StructuredAgentSessionCaller, params: AgentSessionAttachParams) =>
+        this.attach(caller, params)
+    }
+  }
+
   flushStreamedEvents = (sessionId: string): Promise<void> =>
     this.runtimeState.flushEventSink(sessionId)
 
@@ -298,10 +334,6 @@ export class StructuredAgentSessionHost {
   unsubscribe = (sessionId: string, id: string): void => this.subscribers.close(sessionId, id)
 
   private requireSession(sessionId: string): StructuredAgentSessionHostSession {
-    const session = this.sessions.get(sessionId)
-    if (!session) {
-      throw new Error(AGENT_SESSION_NOT_ATTACHED.code)
-    }
-    return session
+    return requireStructuredSession(this.sessions, sessionId)
   }
 }

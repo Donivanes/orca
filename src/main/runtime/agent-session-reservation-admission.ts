@@ -21,6 +21,7 @@ import {
   agentSessionExecutionLocationsEqual,
   isAgentSessionLaunchArgs,
   isAgentSessionLaunchEnv,
+  isAgentSessionOptions,
   type AgentSessionAccountHome,
   type AgentSessionExecutionLocation,
   type AgentSessionLaunchArgs,
@@ -39,6 +40,8 @@ export type AgentSessionReserveRequest = {
   location: AgentSessionExecutionLocation
   provider: AgentSessionHandleProvider
   accountHome: AgentSessionAccountHome
+  /** Create-time provider options, pinned before acquisition and the first turn. */
+  initialOptions?: Readonly<Record<string, string>>
   /** Arguments pinned on first reservation so owner replacement repeats the same launch. */
   launchArgs?: AgentSessionLaunchArgs
   /** Current launch input validated here but never written to the durable record. */
@@ -131,6 +134,9 @@ export function applyAgentSessionReservation(
   if (request.launchArgs && !isAgentSessionLaunchArgs(request.launchArgs)) {
     throw new Error('agent_session_launch_args_invalid')
   }
+  if (request.initialOptions && !isAgentSessionOptions(request.initialOptions)) {
+    throw new Error('agent_session_operation_invalid')
+  }
   const reservation: AgentSessionReservation = {
     runtimeKind: request.runtimeKind,
     spawnToken:
@@ -186,6 +192,7 @@ function createAgentSessionRecord(
     provider: request.provider,
     providerHandleChain: [],
     accountHome: request.accountHome,
+    ...(request.initialOptions ? { options: { ...request.initialOptions } } : {}),
     ...(request.launchArgs ? { launchArgs: [...request.launchArgs] } : {}),
     createdAt: request.now,
     updatedAt: request.now,

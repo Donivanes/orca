@@ -10,14 +10,76 @@ import {
   decideWebSessionTabsSnapshot
 } from './web-session-tabs-sync'
 import type { WebSessionTabsSyncState } from './web-session-tabs-sync'
+import { refreshLocalRuntimeCapabilities } from './local-runtime-capabilities'
+import { reconcileStructuredAgentSessionOutboxStorage } from '@/lib/structured-agent-session-outbox-storage'
 
 export const LOCAL_STRUCTURED_SESSION_OWNER = 'local-structured-session'
 let localStructuredSessionTabsRestorePromise: Promise<void> | null = null
 
 type SessionTabsEvent =
-  | (RuntimeMobileSessionTabsResult & { type: 'snapshot' | 'updated' })
-  | { type: 'snapshots'; snapshots: RuntimeMobileSessionTabsResult[] }
+  | (RuntimeMobileSessionTabsResult & {
+      type: 'snapshot' | 'updated'
+      removed?: true
+    })
+  | {
+      type: 'snapshots'
+      snapshots: RuntimeMobileSessionTabsResult[]
+      authoritative?: true
+    }
   | { type: 'end' }
+
+const localStructuredSessionIdsByWorktree = new Map<string, string[]>()
+let localStructuredSessionOutboxInventoryKnown = false
+
+function localStructuredSessionIds(): string[] {
+  return [...localStructuredSessionIdsByWorktree.values()].flat().sort()
+}
+
+function structuredSessionIds(snapshot: RuntimeMobileSessionTabsResult): string[] {
+  return snapshot.tabs.flatMap((tab) => (tab.type === 'agent-session' ? [tab.sessionId] : []))
+}
+
+export function reconcileLocalStructuredSessionOutboxEvent(event: SessionTabsEvent): void {
+  if (event.type === 'end') {
+    return
+  }
+  const previousSessionIds = localStructuredSessionIds()
+  if (event.type === 'snapshots') {
+    if (event.authoritative) {
+      localStructuredSessionIdsByWorktree.clear()
+      for (const snapshot of event.snapshots) {
+        localStructuredSessionIdsByWorktree.set(snapshot.worktree, structuredSessionIds(snapshot))
+      }
+      localStructuredSessionOutboxInventoryKnown = true
+    } else {
+      for (const snapshot of event.snapshots) {
+        const known = localStructuredSessionIdsByWorktree.get(snapshot.worktree) ?? []
+        localStructuredSessionIdsByWorktree.set(snapshot.worktree, [
+          ...new Set([...known, ...structuredSessionIds(snapshot)])
+        ])
+      }
+    }
+  } else if (event.removed) {
+    localStructuredSessionIdsByWorktree.delete(event.worktree)
+  } else {
+    localStructuredSessionIdsByWorktree.set(event.worktree, structuredSessionIds(event))
+  }
+  const nextSessionIds = localStructuredSessionIds()
+  const inventoryChanged =
+    previousSessionIds.length !== nextSessionIds.length ||
+    previousSessionIds.some((sessionId, index) => sessionId !== nextSessionIds[index])
+  if (
+    localStructuredSessionOutboxInventoryKnown &&
+    (inventoryChanged || (event.type === 'snapshots' && event.authoritative))
+  ) {
+    void reconcileStructuredAgentSessionOutboxStorage(nextSessionIds)
+  }
+}
+
+export function resetLocalStructuredSessionOutboxInventoryForTests(): void {
+  localStructuredSessionIdsByWorktree.clear()
+  localStructuredSessionOutboxInventoryKnown = false
+}
 
 export function projectLocalStructuredSessionTabs(
   snapshot: RuntimeMobileSessionTabsResult
@@ -99,7 +161,8 @@ export function applyLocalStructuredSessionTabSnapshots<
 }
 
 export function restoreLocalStructuredSessionTabsOnce(): Promise<void> {
-  localStructuredSessionTabsRestorePromise ??= refreshLocalStructuredSessionTabs()
+  localStructuredSessionTabsRestorePromise ??= refreshLocalRuntimeCapabilities()
+    .then(() => refreshLocalStructuredSessionTabs())
     .then(() => undefined)
     .catch((error) => {
       localStructuredSessionTabsRestorePromise = null
@@ -116,8 +179,16 @@ export function refreshLocalStructuredSessionTabs(): Promise<RuntimeMobileSessio
       if (!response.ok) {
         throw new Error('structured session inventory unavailable')
       }
-      const result = response.result as { snapshots?: RuntimeMobileSessionTabsResult[] }
+      const result = response.result as {
+        snapshots?: RuntimeMobileSessionTabsResult[]
+        authoritative?: true
+      }
       const snapshots = result.snapshots ?? []
+      reconcileLocalStructuredSessionOutboxEvent({
+        type: 'snapshots',
+        snapshots,
+        ...(result.authoritative === true ? { authoritative: true } : {})
+      })
       applyStructuredSessionTabSnapshots(snapshots)
       return snapshots
     })
@@ -127,11 +198,11 @@ async function startLocalStructuredSessionTabsSync(args: {
   isDisposed: () => boolean
   setUnsubscribe: (unsubscribe: () => void) => void
 }): Promise<void> {
-  const status = await window.api.runtime.getStatus()
+  const capabilities = await refreshLocalRuntimeCapabilities()
   if (args.isDisposed()) {
     return
   }
-  const supported = status.capabilities?.includes(STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY)
+  const supported = capabilities.includes(STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY)
   await restoreLocalStructuredSessionTabsOnce()
   if (args.isDisposed()) {
     return
@@ -147,8 +218,10 @@ async function startLocalStructuredSessionTabsSync(args: {
       }
       const event = response.result as SessionTabsEvent
       if (event.type === 'snapshots') {
+        reconcileLocalStructuredSessionOutboxEvent(event)
         applyStructuredSessionTabSnapshots(event.snapshots)
       } else if (event.type === 'snapshot' || event.type === 'updated') {
+        reconcileLocalStructuredSessionOutboxEvent(event)
         applyStructuredSessionTabSnapshots([event])
       }
     }

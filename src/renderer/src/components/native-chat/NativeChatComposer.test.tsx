@@ -263,7 +263,7 @@ describe('NativeChatComposer', () => {
   })
 
   it('routes structured sends and hydrated options through the existing composer', async () => {
-    const send = vi.fn(() => true)
+    const send = vi.fn(async () => true)
     const dispatchCommand = vi.fn(async () => ({
       handled: false,
       accepted: false,
@@ -307,7 +307,7 @@ describe('NativeChatComposer', () => {
   it('sends structured image attachments through the durable transport', async () => {
     mocks.draft = ''
     mocks.imageAttachments = [{ id: 'image-1', path: '/tmp/image.png' }]
-    const send = vi.fn(() => true)
+    const send = vi.fn(async () => true)
     render(
       <NativeChatComposer
         terminalTabId="tab-1"

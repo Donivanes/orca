@@ -3,13 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { agentJournalItemKey } from '../../../shared/agent-session-journal-item-key'
-import type { AgentSessionOwnerProbe } from '../../../shared/agent-session-lease-adjudication'
 import { computeAgentSessionPayloadFingerprint } from '../../../shared/agent-session-mutation-envelope'
 import type { AgentSessionRecord } from '../../../shared/agent-session-record'
-import type {
-  AgentSessionMutationEnvelope,
-  AgentSessionSubscribeEvent
-} from '../../../shared/agent-session-wire'
+import type { AgentSessionMutationEnvelope } from '../../../shared/agent-session-wire'
 import { AgentSessionRecordStore } from '../../runtime/agent-session-record-store'
 import { journalDirectoryFor } from '../agent-session-journal/journal-paths'
 import {
@@ -57,6 +53,20 @@ const attachParams = (
 ): AgentSessionAttachParams => hostTestAttachParams(null, overrides)
 
 const ensureParams = (fence: number): AgentSessionAttachParams => hostTestAttachParams(fence)
+
+function createIntentEnvelope(): AgentSessionMutationEnvelope {
+  const fields = { worktree: 'id:workspace-1', agent: 'codex' as const }
+  return {
+    sessionId: SESSION,
+    clientOperationId: hostTestOperationId(),
+    expectedRuntimeFence: null,
+    payloadFingerprint: computeAgentSessionPayloadFingerprint({
+      method: 'agentSession.create',
+      sessionId: SESSION,
+      fields
+    })
+  }
+}
 
 let root: string
 let store: AgentSessionRecordStore
@@ -164,6 +174,86 @@ afterEach(async () => {
 })
 
 describe('attach', () => {
+  it('upgrades an admitted create intent and replays it without another acquisition', async () => {
+    const intent = createIntentEnvelope()
+    expect(await host.admitOrReplayCreateIntent(CALLER, intent)).toBeNull()
+    const params = hostTestAttachParams(null, {
+      envelope: intent,
+      providerHandle: undefined,
+      operationFingerprint: intent.payloadFingerprint
+    })
+
+    expect(await host.attach(CALLER, params)).toMatchObject({ ok: true, replayed: false })
+    host.releaseCreateIntentAdmission(CALLER, intent)
+    expect(await host.admitOrReplayCreateIntent(CALLER, intent)).toMatchObject({
+      ok: true,
+      replayed: true
+    })
+    expect(acquire).toHaveBeenCalledOnce()
+  })
+
+  it('never classifies an in-flight create admission as processless', async () => {
+    const intent = createIntentEnvelope()
+    expect(await host.admitOrReplayCreateIntent(CALLER, intent)).toBeNull()
+
+    expect(await host.admitOrReplayCreateIntent(CALLER, intent)).toMatchObject({
+      ok: false,
+      refusal: { code: 'agent_session_ownership_unknown' }
+    })
+    const replay = await host.admitOrReplayCreateIntent(CALLER, intent)
+    if (replay?.ok !== false) {
+      throw new Error('expected an in-flight ownership refusal')
+    }
+    expect(replay.refusal).not.toHaveProperty('acquisitionState')
+    expect(acquire).not.toHaveBeenCalled()
+  })
+
+  it('proves an orphaned pre-reservation create admission never acquired', async () => {
+    const intent = createIntentEnvelope()
+    expect(await host.admitOrReplayCreateIntent(CALLER, intent)).toBeNull()
+    await host.flushAllStreamedEvents()
+    host = new StructuredAgentSessionHost({
+      store,
+      adapter: adapter(),
+      journalRoot: root,
+      claimKeyId: 'key-1',
+      mintSpawnToken: () => 'spawn-a',
+      now: () => NOW
+    })
+
+    expect(await host.admitOrReplayCreateIntent(CALLER, intent)).toMatchObject({
+      ok: false,
+      refusal: {
+        code: 'agent_session_operation_unknown',
+        acquisitionState: 'not-acquired'
+      }
+    })
+    expect(acquire).not.toHaveBeenCalled()
+  })
+
+  it('durably replays a true support refusal as not acquired', async () => {
+    const intent = createIntentEnvelope()
+    expect(await host.admitOrReplayCreateIntent(CALLER, intent)).toBeNull()
+    await expect(
+      host.settleCreateIntentRefusal(CALLER, intent, {
+        code: 'structured_agent_session_unsupported',
+        message: 'remote host does not support structured create'
+      })
+    ).resolves.toMatchObject({
+      ok: false,
+      refusal: { acquisitionState: 'not-acquired' }
+    })
+
+    expect(await host.admitOrReplayCreateIntent(CALLER, intent)).toMatchObject({
+      ok: false,
+      refusal: {
+        code: 'structured_agent_session_unsupported',
+        acquisitionState: 'not-acquired'
+      }
+    })
+    expect(acquire).not.toHaveBeenCalled()
+  })
+
   it('reserves the lease, spawns through the adapter, and opens the journal', async () => {
     const result = await host.attach(CALLER, attachParams())
     expect(result).toMatchObject({ ok: true, replayed: false })
@@ -639,241 +729,5 @@ describe('setOption', () => {
       refusal: { code: 'agent_session_operation_unknown' }
     })
     expect(setOption).toHaveBeenCalledTimes(1)
-  })
-})
-
-describe('restart', () => {
-  /** A restarted process: the same directories, a new store and a new host over
-   *  them. Every lease loads unreconciled, so this is the state that decides
-   *  whether a persisted session is reachable at all. */
-  async function reboot(
-    probeOwner: (record: AgentSessionRecord) => Promise<AgentSessionOwnerProbe>
-  ) {
-    store = await AgentSessionRecordStore.open({ directory: join(root, 'store'), hostId: 'local' })
-    host = new StructuredAgentSessionHost({
-      store,
-      adapter: adapter(),
-      journalRoot: root,
-      claimKeyId: 'key-1',
-      mintSpawnToken: () => 'spawn-b',
-      probeOwner,
-      now: () => NOW
-    })
-  }
-
-  /** The refusal a restarted host owes a client holding the dead generation's
-   *  fence: stale, with the live fence attached so the retry can succeed. */
-  async function staleFenceFrom(held: number): Promise<number> {
-    const refused = await host.attach(CALLER, ensureParams(held))
-    if (refused.ok) {
-      throw new Error('a fence from the previous host generation was accepted')
-    }
-    expect(refused.refusal.code).toBe('agent_session_checkpoint_stale')
-    const current = refused.refusal.currentFence
-    expect(current).toBeGreaterThan(held)
-    return current ?? 0
-  }
-
-  it('adjudicates the leases it loaded before deciding who may write', async () => {
-    const before = await attach()
-    const held = before?.lease.runtimeFence ?? 0
-    await reboot(async () => ({ outcome: 'pid-absent' }))
-
-    const reattached = await host.attach(CALLER, ensureParams(await staleFenceFrom(held)))
-    expect(reattached).toMatchObject({ ok: true })
-    expect(store.getRecord(SESSION)?.lease.unreconciled).toBe(false)
-    expect(store.getRecord(SESSION)?.lease.ownerProcess?.pid).toBe(4242)
-  })
-
-  it('restores durable journals for read-only history without acquiring a provider', async () => {
-    await attach()
-    const body = hostTestMessage('persisted conversation')
-    await host.send(CALLER, { envelope: envelope('agentSession.send', { body }), body })
-    await reboot(async () => ({ outcome: 'indeterminate', reason: 'read does not need ownership' }))
-    acquire.mockClear()
-    const listRecords = vi.spyOn(store, 'listRecords')
-
-    await host.restoreReadableSessions()
-    const restoreReads = listRecords.mock.calls.length
-    await host.restoreReadableSessions()
-
-    expect(host.listSessionTabs()).toEqual([
-      { sessionId: SESSION, workspaceId: 'workspace-1', agent: 'codex' }
-    ])
-    const history = host.history({ sessionId: SESSION, direction: 'tail' })
-    expect(history.ok && history.page.items).not.toHaveLength(0)
-    expect(acquire).not.toHaveBeenCalled()
-    expect(listRecords).toHaveBeenCalledTimes(restoreReads)
-  })
-
-  it('clears stale TUI recovery at restart, and reacquires the native owner when a surface holds it', async () => {
-    await attach()
-    await store.transitionHandoff(SESSION, (record) => ({
-      ...record,
-      lease: {
-        ...record.lease,
-        runtimeKind: 'tui',
-        handoffStage: 'manual-recovery'
-      }
-    }))
-    await reboot(async () => ({ outcome: 'pid-absent' }))
-    acquire.mockClear()
-
-    await host.restoreReadableSessions()
-    // The recovery stage clears on evidence at startup; the child comes back only once a surface
-    // holds the session (see structured-agent-session-surface-lifetime.test.ts).
-    await host.hold(SESSION, 'surface-1')
-
-    expect(acquire).toHaveBeenCalledOnce()
-    expect(store.getRecord(SESSION)?.lease).toMatchObject({
-      runtimeKind: 'native',
-      claimStatus: 'live',
-      handoffStage: null,
-      handoffOperationId: null
-    })
-    await expect(host.handoffStatus(SESSION)).resolves.toMatchObject({
-      owner: 'native',
-      phase: 'idle',
-      stage: null
-    })
-  })
-
-  it("keeps a session whose owner cannot be probed out of a live writer's hands", async () => {
-    await attach()
-    const held = store.getRecord(SESSION)?.lease.runtimeFence ?? 0
-    await reboot(async () => ({ outcome: 'indeterminate', reason: 'no probe on this host' }))
-
-    expect(await host.attach(CALLER, ensureParams(held))).toMatchObject({
-      ok: false,
-      refusal: { code: 'agent_session_ownership_unknown' }
-    })
-  })
-
-  it('does not remember a failed adjudication as done', async () => {
-    const before = await attach()
-    const held = before?.lease.runtimeFence ?? 0
-    const probe = vi
-      .fn<(record: AgentSessionRecord) => Promise<AgentSessionOwnerProbe>>()
-      .mockRejectedValueOnce(new Error('probe exploded'))
-      .mockResolvedValue({ outcome: 'pid-absent' })
-    await reboot(probe)
-
-    await expect(host.attach(CALLER, ensureParams(held))).rejects.toThrow('probe exploded')
-    const reattached = await host.attach(CALLER, ensureParams(await staleFenceFrom(held)))
-    expect(reattached).toMatchObject({ ok: true })
-    expect(probe).toHaveBeenCalledTimes(2)
-  })
-})
-
-describe('subscribe', () => {
-  it('opens with a snapshot and then streams cursor-qualified batches', async () => {
-    await attach()
-    const events: AgentSessionSubscribeEvent[] = []
-    const dispose = host.subscribe({
-      id: 'sub-1',
-      sessionId: SESSION,
-      emit: (event) => events.push(event)
-    })
-    const body = hostTestMessage('add a retry')
-    await host.send(CALLER, { envelope: envelope('agentSession.send', { body }), body })
-
-    expect(events[0]?.type).toBe('snapshot')
-    const batches = events.filter((event) => event.type === 'batch')
-    expect(batches.length).toBeGreaterThan(0)
-    const last = batches.at(-1)
-    expect(last?.type === 'batch' && last.batch.cursor.sequence).toBeGreaterThan(0)
-
-    dispose()
-    expect(events.at(-1)?.type).toBe('end')
-  })
-
-  it('resumes from a client cursor with only the rows it missed', async () => {
-    await attach()
-    const body = hostTestMessage('add a retry')
-    const first = await host.send(CALLER, {
-      envelope: envelope('agentSession.send', { body }),
-      body
-    })
-    if (!first.ok) {
-      throw new Error(`expected a send, got ${first.refusal.code}`)
-    }
-
-    const events: AgentSessionSubscribeEvent[] = []
-    host.subscribe({
-      id: 'sub-2',
-      sessionId: SESSION,
-      emit: (event) => events.push(event),
-      cursor: first.cursor
-    })
-    expect(events[0]).toMatchObject({ type: 'batch', handoff: { owner: 'native', phase: 'idle' } })
-
-    const second = hostTestMessage('and a timeout')
-    await host.send(CALLER, {
-      envelope: envelope('agentSession.send', { body: second }),
-      body: second
-    })
-    expect(events.some((event) => event.type === 'batch')).toBe(true)
-    expect(events.some((event) => event.type === 'snapshot')).toBe(false)
-  })
-
-  it('drops a failed transport without aborting the mutation or other subscribers', async () => {
-    await attach()
-    const events: AgentSessionSubscribeEvent[] = []
-    host.subscribe({
-      id: 'dead-sub',
-      sessionId: SESSION,
-      emit: () => {
-        throw new Error('socket closed')
-      }
-    })
-    host.subscribe({
-      id: 'live-sub',
-      sessionId: SESSION,
-      emit: (event) => events.push(event)
-    })
-    const body = hostTestMessage('survive subscriber failure')
-
-    const result = await host.send(CALLER, {
-      envelope: envelope('agentSession.send', { body }),
-      body
-    })
-
-    expect(result).toMatchObject({ ok: true, value: { submission: { dispatchState: 'accepted' } } })
-    expect(dispatch).toHaveBeenCalledTimes(1)
-    expect(events.some((event) => event.type === 'batch')).toBe(true)
-  })
-
-  it('resets a subscriber whose epoch is gone', async () => {
-    await attach()
-    const events: AgentSessionSubscribeEvent[] = []
-    host.subscribe({
-      id: 'sub-3',
-      sessionId: SESSION,
-      emit: (event) => events.push(event),
-      cursor: { epoch: 'epoch-from-a-previous-life', sequence: 3 }
-    })
-    expect(events[0]).toMatchObject({ type: 'reset', reset: 'epoch_changed', fence: 1 })
-  })
-
-  it('publishes the replacement fence when the owner generation changes', async () => {
-    const record = await attach()
-    const events: AgentSessionSubscribeEvent[] = []
-    host.subscribe({
-      id: 'sub-4',
-      sessionId: SESSION,
-      emit: (event) => events.push(event)
-    })
-    const released = await store.evictProvenDeadOwner({
-      sessionId: SESSION,
-      expectedFence: record?.lease.runtimeFence ?? 1,
-      probe: { outcome: 'pid-absent' },
-      now: NOW
-    })
-
-    const replacement = await host.attach(CALLER, ensureParams(released.lease.runtimeFence))
-    if (!replacement.ok) {
-      throw new Error(`expected replacement owner, got ${replacement.refusal.code}`)
-    }
-    expect(events.at(-1)).toMatchObject({ type: 'snapshot', fence: replacement.fence })
   })
 })

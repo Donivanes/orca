@@ -159,6 +159,35 @@ describe('registerRuntimeHandlers', () => {
     })
   })
 
+  it('negotiates authoritative session inventory for local desktop callers', async () => {
+    const runtime = {
+      syncWindowGraph: vi.fn(),
+      getStatus: vi.fn(),
+      getRuntimeId: vi.fn().mockReturnValue('runtime-1'),
+      restoreStructuredAgentSessionTabs: vi.fn().mockResolvedValue(undefined),
+      supportsAuthoritativeSessionTabsInventory: vi.fn().mockReturnValue(true),
+      listAllMobileSessionTabsInventory: vi.fn().mockResolvedValue({
+        snapshots: [],
+        authoritative: true as const
+      })
+    }
+
+    registerRuntimeHandlers(runtime as never)
+
+    const callRegistration = handleMock.mock.calls.find(([channel]) => channel === 'runtime:call')
+    expect(callRegistration).toBeTruthy()
+    const result = await callRegistration![1](runtimeCallEvent(), {
+      method: 'session.tabs.listAll',
+      params: null
+    })
+
+    expect(result).toMatchObject({
+      ok: true,
+      result: { snapshots: [], authoritative: true },
+      _meta: { runtimeId: 'runtime-1' }
+    })
+  })
+
   it('registers local runtime streaming subscription lifecycle handlers', () => {
     registerRuntimeHandlers({ syncWindowGraph: vi.fn(), getStatus: vi.fn() } as never)
 

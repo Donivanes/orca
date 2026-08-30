@@ -121,7 +121,7 @@ describe('useStructuredAgentSessionOutbox', () => {
       { initialProps: { fence: 1 } }
     )
 
-    act(() => expect(result.current.send('hello')).toBe(true))
+    await act(async () => expect(await result.current.send('hello')).toBe(true))
     await waitFor(() => expect(mocks.call).toHaveBeenCalledTimes(1))
 
     rerender({ fence: 2 })
@@ -153,14 +153,14 @@ describe('useStructuredAgentSessionOutbox', () => {
         })
       )
 
-      act(() => expect(result.current.send('hello')).toBe(true))
+      await act(async () => expect(await result.current.send('hello')).toBe(true))
       await waitFor(() => expect(result.current.outbox[0]?.state).toBe('queued'))
       const firstId = (mocks.call.mock.calls[0]![2] as { envelope: { clientOperationId: string } })
         .envelope.clientOperationId
       const retryId = result.current.outbox[0]!.clientMessageId
       expect(retryId).not.toBe(firstId)
 
-      act(() => result.current.retry(retryId))
+      await act(async () => result.current.retry(retryId))
       await waitFor(() => expect(mocks.call).toHaveBeenCalledTimes(2))
       expect(
         (mocks.call.mock.calls[1]![2] as { envelope: { clientOperationId: string } }).envelope
@@ -182,13 +182,13 @@ describe('useStructuredAgentSessionOutbox', () => {
       })
     )
 
-    act(() => expect(result.current.send('hello')).toBe(true))
+    await act(async () => expect(await result.current.send('hello')).toBe(true))
     await waitFor(() => expect(result.current.outbox[0]?.state).toBe('queued'))
     const firstId = (mocks.call.mock.calls[0]![2] as { envelope: { clientOperationId: string } })
       .envelope.clientOperationId
     expect(result.current.outbox[0]?.clientMessageId).toBe(firstId)
 
-    act(() => result.current.retry(firstId))
+    await act(async () => result.current.retry(firstId))
     await waitFor(() => expect(mocks.call).toHaveBeenCalledTimes(2))
     expect(
       (mocks.call.mock.calls[1]![2] as { envelope: { clientOperationId: string } }).envelope
@@ -207,9 +207,11 @@ describe('useStructuredAgentSessionOutbox', () => {
       })
     )
 
-    act(() =>
+    await act(async () =>
       expect(
-        result.current.send('', [{ path: '/tmp/image.png', previewUri: 'file:///tmp/image.png' }])
+        await result.current.send('', [
+          { path: '/tmp/image.png', previewUri: 'file:///tmp/image.png' }
+        ])
       ).toBe(true)
     )
     await waitFor(() => expect(mocks.call).toHaveBeenCalledOnce())
@@ -254,8 +256,8 @@ describe('useStructuredAgentSessionOutbox', () => {
       { initialProps: { submissions: [] as readonly AgentJournalSubmission[] } }
     )
 
-    act(() => {
-      expect(result.current.send('first')).toBe(true)
+    await act(async () => {
+      expect(await result.current.send('first')).toBe(true)
     })
     await waitFor(() => expect(result.current.outbox[0]?.state).toBe('unconfirmed'))
     const firstId = result.current.outbox[0]!.clientMessageId
@@ -273,12 +275,12 @@ describe('useStructuredAgentSessionOutbox', () => {
         }
       ]
     })
-    act(() => {
-      expect(result.current.send('second')).toBe(true)
+    await act(async () => {
+      expect(await result.current.send('second')).toBe(true)
     })
     expect(result.current.outbox).toHaveLength(2)
 
-    act(() => result.current.retry(firstId))
+    await act(async () => result.current.retry(firstId))
     await waitFor(() => expect(mocks.call).toHaveBeenCalledTimes(3))
     await waitFor(() => expect(result.current.outbox).toHaveLength(0))
     const retryParams = mocks.call.mock.calls[1]?.[2] as { retryUnknown?: true } | undefined
@@ -317,10 +319,10 @@ describe('useStructuredAgentSessionOutbox', () => {
       { initialProps: { submissions: [] as readonly AgentJournalSubmission[] } }
     )
 
-    act(() => expect(result.current.send('first')).toBe(true))
+    await act(async () => expect(await result.current.send('first')).toBe(true))
     await waitFor(() => expect(result.current.outbox[0]?.state).toBe('unconfirmed'))
     const firstId = result.current.outbox[0]!.clientMessageId
-    act(() => expect(result.current.send('second')).toBe(true))
+    await act(async () => expect(await result.current.send('second')).toBe(true))
     rerender({
       submissions: [
         {
@@ -336,7 +338,7 @@ describe('useStructuredAgentSessionOutbox', () => {
       ]
     })
 
-    act(() => result.current.retry(firstId))
+    await act(async () => result.current.retry(firstId))
     await waitFor(() => expect(mocks.call).toHaveBeenCalledTimes(3))
     await waitFor(() => expect(result.current.outbox).toHaveLength(0))
     const retryParams = mocks.call.mock.calls[1]?.[2] as
@@ -363,13 +365,13 @@ describe('useStructuredAgentSessionOutbox', () => {
       { initialProps: { sessionId: 'session-1' } }
     )
 
-    act(() => expect(result.current.send('first session')).toBe(true))
+    await act(async () => expect(await result.current.send('first session')).toBe(true))
     await waitFor(() => expect(result.current.outbox[0]?.state).toBe('unconfirmed'))
 
     rerender({ sessionId: 'session-2' })
     expect(result.current.outbox).toHaveLength(0)
 
-    act(() => expect(result.current.send('second session')).toBe(true))
+    await act(async () => expect(await result.current.send('second session')).toBe(true))
     await waitFor(() => expect(mocks.call).toHaveBeenCalledTimes(2))
     expect(mocks.call.mock.calls[1]?.[2]).toMatchObject({
       envelope: { sessionId: 'session-2' },
@@ -395,7 +397,7 @@ describe('useStructuredAgentSessionOutbox', () => {
       { initialProps: { sessionId: 'session-1' } }
     )
 
-    act(() => expect(result.current.send('hello')).toBe(true))
+    await act(async () => expect(await result.current.send('hello')).toBe(true))
     await waitFor(() => expect(result.current.error).toBe('agent_session_checkpoint_stale'))
 
     rerender({ sessionId: 'session-2' })
@@ -433,7 +435,7 @@ describe('useStructuredAgentSessionOutbox', () => {
     const actEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
     try {
       await act(async () => root.render(<Probe sessionId="session-1" />))
-      act(() => expect(controllerRef.current?.send('hello')).toBe(true))
+      await act(async () => expect(await controllerRef.current?.send('hello')).toBe(true))
       await waitFor(() => expect(mocks.call).toHaveBeenCalledTimes(1))
       const oldSettlementProcessed = oldDispatch.promise.then(() => undefined)
 

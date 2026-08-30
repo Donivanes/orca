@@ -361,7 +361,7 @@ import type {
   ForceDeleteWorktreeBranchResult,
   RemoveWorktreeResult
 } from '../../shared/worktree/create-types'
-import type { WorktreeStartupLaunch } from '../../shared/worktree/launch-types'
+import type { WorktreeSetupLaunch, WorktreeStartupLaunch } from '../../shared/worktree/launch-types'
 import type {
   WorkspaceLineage,
   WorktreeLineage,
@@ -555,11 +555,7 @@ import {
   buildSetupRunnerCommand,
   getSetupRunnerCommandPlatformForPath
 } from '../../shared/setup-runner-command'
-import {
-  applySequencedSetupLaunch,
-  createSequencedSetupAgentCommands,
-  SETUP_AGENT_SEQUENCE_STARTUP_COMMAND_ENV
-} from '../../shared/setup-agent-sequencing'
+import { SETUP_AGENT_SEQUENCE_STARTUP_COMMAND_ENV } from '../../shared/setup-agent-sequencing'
 import { TASK_PROVIDERS } from '../../shared/task-providers'
 import { FIRST_PANE_ID } from '../../shared/pane-key'
 import {
@@ -1620,6 +1616,7 @@ type TerminalAgentStatusSnapshot = {
 
 type TerminalCreateOptions = {
   command?: string
+  directExec?: { executable: string; argv: string[] }
   claudeAgentTeamsSourceCommand?: string
   cwd?: string
   env?: Record<string, string>
@@ -1986,6 +1983,7 @@ type RuntimePtyController = {
     rows: number
     cwd?: string
     command?: string
+    directExec?: { executable: string; argv: string[] }
     launchAgent?: TuiAgent
     commandDelivery?: 'renderer' | 'provider'
     startupCommandDelivery?: WorktreeStartupLaunch['startupCommandDelivery']
@@ -3132,6 +3130,28 @@ function getSetupRunnerCommandPlatformForLaunch(
   return getSetupRunnerCommandPlatformForPath(setup?.runnerScriptPath ?? '', fallbackPlatform)
 }
 
+function getDirectSetupExec(
+  setup: WorktreeSetupLaunch,
+  platform: 'windows' | 'posix'
+): { executable: string; argv: string[] } | undefined {
+  // WSL and SSH providers need their own host-specific command routing; keep those launches
+  // shell-mediated until the remote owner advertises the structured-create capability.
+  if (setup.shell?.executable?.toLowerCase().endsWith('wsl.exe')) {
+    return undefined
+  }
+  if (platform === 'posix' && setup.runnerScriptPath.startsWith('/')) {
+    return { executable: 'bash', argv: [setup.runnerScriptPath] }
+  }
+  if (platform === 'windows' && /\.(cmd|bat)$/i.test(setup.runnerScriptPath)) {
+    const comspec = process.env.ComSpec || 'cmd.exe'
+    return {
+      executable: comspec,
+      argv: ['/d', '/s', '/v:on', '/c', `""${setup.runnerScriptPath}""`]
+    }
+  }
+  return undefined
+}
+
 export type RuntimeRendererReloadFence = Readonly<{
   revision: number
   recovery: 'renderer' | 'headless' | 'reloading'
@@ -3145,6 +3165,20 @@ type ProviderSnapshotReadOptions = {
   timeoutMs?: number
   retireOnTimeout?: boolean
   visibleScreenOnly?: boolean
+}
+
+/** Ordered, provider-backed PTY termination evidence exposed to runtime waiters. */
+export type RuntimePtyExitEvent = Readonly<{
+  ptyId: string
+  exitCode: number
+  incarnationId: PtyIncarnationId
+  cause: TerminalExitCause
+}>
+
+/** Setup sequencing admits exactly one terminal outcome; all inferred, signaled, or mismatched
+ * statuses fail closed so an agent can never start against an unproven environment. */
+export function isSuccessfulSetupExitEvidence(event: RuntimePtyExitEvent): boolean {
+  return event.cause.kind === 'exited' && event.cause.exitCode === 0 && event.exitCode === 0
 }
 
 export class OrcaRuntimeService {
@@ -3295,7 +3329,7 @@ export class OrcaRuntimeService {
   private sessionTabsInventoryPublicationEpoch: number | null = null
   private sessionTabsInventoryWaiters = new Set<() => void>()
   private waitersByHandle = new Map<string, Set<TerminalWaiter>>()
-  private ptyExitListenersByPtyId = new Map<string, Set<() => void>>()
+  private ptyExitListenersByPtyId = new Map<string, Set<(event: RuntimePtyExitEvent) => void>>()
   private ptyController: RuntimePtyController | null = null
   private notifier: RuntimeNotifier | null = null
   private clientEventListeners = new Set<(event: RuntimeClientEvent) => void>()
@@ -16020,7 +16054,6 @@ export class OrcaRuntimeService {
       pty?.incarnationId ??
       `runtime:${this.runtimeId}:${this.getPtyLifecycleGeneration(ptyId)}`
     this.advancePtyLifecycleGeneration(ptyId)
-    this.notifyPtyExitListeners(ptyId)
     const exactSurfaceByKey = new Map<
       string,
       Pick<RetiredTerminalSurface, 'worktreeId' | 'parentTabId' | 'leafId'>
@@ -16172,6 +16205,14 @@ export class OrcaRuntimeService {
         exitedSurfaces.push({ handle: leafHandle, paneKey: `${leaf.tabId}:${leaf.leafId}` })
       }
     }
+    // Publish only after the mutable PTY/leaf records carry the same evidence. Late subscribers
+    // and re-entrant observers therefore see one coherent exit certificate.
+    this.notifyPtyExitListeners(ptyId, {
+      ptyId,
+      exitCode,
+      incarnationId,
+      cause: exitCause
+    })
     // Why: an explicit whole-tab close drops the leaf from the graph *before*
     // this exit lands, so a leaf-only walk found nothing and left the dispatch
     // reading 'dispatched' forever against a dead process. The PTY's own handle
@@ -20732,10 +20773,17 @@ export class OrcaRuntimeService {
     })
   }
 
-  subscribeToPtyExit(ptyId: string, listener: () => void): () => void {
+  subscribeToPtyExit(ptyId: string, listener: (event: RuntimePtyExitEvent) => void): () => void {
     const lifecycleGeneration = this.getPtyLifecycleGeneration(ptyId)
     if (this.isPtyKnownExited(ptyId)) {
-      listener()
+      const pty = this.ptysById.get(ptyId)
+      const exitCode = pty?.lastExitCode ?? -1
+      listener({
+        ptyId,
+        exitCode,
+        incarnationId: pty?.incarnationId ?? `runtime:${this.runtimeId}:${lifecycleGeneration}`,
+        cause: pty?.lastExitCause ?? resolveUnreportedExitCause(exitCode)
+      })
       return () => {}
     }
     let listeners = this.ptyExitListenersByPtyId.get(ptyId)
@@ -20760,7 +20808,16 @@ export class OrcaRuntimeService {
       this.isPtyKnownExited(ptyId)
     ) {
       unsubscribe()
-      listener()
+      const pty = this.ptysById.get(ptyId)
+      const exitCode = pty?.lastExitCode ?? -1
+      listener({
+        ptyId,
+        exitCode,
+        incarnationId:
+          pty?.incarnationId ??
+          `runtime:${this.runtimeId}:${this.getPtyLifecycleGeneration(ptyId)}`,
+        cause: pty?.lastExitCause ?? resolveUnreportedExitCause(exitCode)
+      })
     }
     return unsubscribe
   }
@@ -20817,6 +20874,38 @@ export class OrcaRuntimeService {
             }
           })
           .catch(fail)
+      }
+    })
+  }
+
+  /**
+   * Returns the provider-owned termination certificate for a Setup PTY. This is intentionally
+   * separate from the legacy numeric waiter: sequencing must reject inferred/unknown status and
+   * only accept an explicit normal exit from the matching PTY incarnation.
+   */
+  async waitForSetupTerminalEvidence(handle: string): Promise<RuntimePtyExitEvent> {
+    const ptyId = this.getLivePtyForHandle(handle)?.pty.ptyId
+    if (!ptyId) {
+      throw new Error('terminal_handle_stale')
+    }
+    return await new Promise<RuntimePtyExitEvent>((resolve, reject) => {
+      let settled = false
+      let unsubscribe: (() => void) | null = null
+      const finish = (event: RuntimePtyExitEvent): void => {
+        if (settled) return
+        settled = true
+        unsubscribe?.()
+        resolve(event)
+      }
+      const fail = (error: unknown): void => {
+        if (settled) return
+        settled = true
+        unsubscribe?.()
+        reject(error)
+      }
+      unsubscribe = this.subscribeToPtyExit(ptyId, finish)
+      if (this.isPtyKnownExited(ptyId) && !settled) {
+        fail(new Error('setup_exit_evidence_unavailable'))
       }
     })
   }
@@ -24978,6 +25067,10 @@ export class OrcaRuntimeService {
     // records. Pass the whole sequenced launch record — command plus the env carrying its
     // script — so the Setup tab runs the script the agent waits on, not a bare runner.
     sequencedSetup?: CreateWorktreeResult['setup']
+    /** Reserve only the Setup surface. Sequenced agent launches create their agent pane
+     * after the provider reports a successful Setup exit, so a placeholder shell must not
+     * occupy the agent surface first. */
+    reservePrimaryTerminal?: boolean
     // Why: a workspace provisioned in the background must not pull the sidebar
     // to itself; the user never asked to look at these tabs.
     surfaceOwner?: false
@@ -25002,7 +25095,11 @@ export class OrcaRuntimeService {
             Pick<GlobalSettings, 'setupScriptLaunchMode'>
           >
         ).setupScriptLaunchMode ?? 'new-tab'
-      if (!args.hasStartupTerminal && !primaryTerminalHandle) {
+      if (
+        !args.hasStartupTerminal &&
+        !primaryTerminalHandle &&
+        args.reservePrimaryTerminal !== false
+      ) {
         const terminal = await this.createTerminal(args.worktreeSelector, surfacing)
         primaryTerminalHandle = terminal.handle
       }
@@ -25027,6 +25124,10 @@ export class OrcaRuntimeService {
             args.setup.shell
           )
         const setupEnv = { ...setupLaunch.envVars, ...observedCommand?.env }
+        const directExec =
+          args.worktreeSelector.startsWith('id:') && !setupLaunch.command
+            ? getDirectSetupExec(args.setup, args.setupCommandPlatform)
+            : undefined
         const shouldSplitSetup =
           primaryTerminalHandle &&
           (setupLaunchMode === 'split-vertical' || setupLaunchMode === 'split-horizontal')
@@ -25041,6 +25142,7 @@ export class OrcaRuntimeService {
           : this.createTerminal(args.worktreeSelector, {
               title: 'Setup',
               command: setupCommand,
+              ...(directExec ? { directExec } : {}),
               env: setupEnv,
               ...surfacing
             }))
@@ -26087,30 +26189,48 @@ export class OrcaRuntimeService {
     let startupTerminalPaneKey: string | null = null
     let startupTerminalPtyId: string | null = null
 
-    let sequencedStartup = effectiveStartup
-    let sequencedSetup: CreateWorktreeResult['setup']
-    if (effectiveStartup && setup?.waitForAgentStartup === true) {
-      const platform = getSetupRunnerCommandPlatformForLaunch(
-        setup,
-        process.platform === 'win32' ? 'windows' : 'posix'
-      )
-      const sequenced = createSequencedSetupAgentCommands({
-        runnerScriptPath: setup.runnerScriptPath,
-        startupCommand: effectiveStartup.command,
-        platform,
-        shell: setup.shell
-      })
-      sequencedStartup = {
-        ...effectiveStartup,
-        command: sequenced.startupCommand,
-        ...(sequenced.startupEnv
-          ? { env: { ...effectiveStartup.env, ...sequenced.startupEnv } }
-          : {})
+    const setupMustGateStartup = Boolean(effectiveStartup && setup?.waitForAgentStartup === true)
+    let setupProvisioned = false
+    let setupWaitSucceeded = !setupMustGateStartup
+
+    // Host-owned sequencing: Setup is a real PTY whose provider exit is the only authorization
+    // to create the Agent PTY. Unknown/lost setup outcomes fail closed; there is no timer that
+    // can silently launch an agent without a successful exit certificate.
+    if (setupMustGateStartup && setup && this.ptyController?.spawn) {
+      try {
+        const provisioned = await this.provisionManagedWorktreeTerminals({
+          worktreeSelector: `id:${worktree.id}`,
+          worktreeId: worktree.id,
+          worktreePath,
+          setup,
+          ...(defaultTabs ? { defaultTabs } : {}),
+          hasStartupTerminal: false,
+          reservePrimaryTerminal: false,
+          setupCommandPlatform: getSetupRunnerCommandPlatformForLaunch(setup, 'posix'),
+          observeSetupCompletion: false,
+          ...(shouldActivate ? {} : { surfaceOwner: false })
+        })
+        didSpawnSetup = provisioned.setupSpawned
+        setupTerminalHandle = provisioned.setupTerminalHandle
+        setupProvisioned = provisioned.setupSpawned
+        if (!setupTerminalHandle) {
+          throw new Error('setup_spawn_failed')
+        }
+        const evidence = await this.waitForSetupTerminalEvidence(setupTerminalHandle)
+        setupWaitSucceeded = isSuccessfulSetupExitEvidence(evidence)
+        if (!setupWaitSucceeded) {
+          warning = `Setup did not complete successfully for ${worktreePath}; the agent was not started.`
+        }
+      } catch (err) {
+        setupWaitSucceeded = false
+        const message = err instanceof Error ? err.message : String(err)
+        warning = warning
+          ? `${warning} Also setup sequencing could not be proven for ${worktreePath}: ${message}`
+          : `Setup sequencing could not be proven for ${worktreePath}: ${message}`
       }
-      sequencedSetup = applySequencedSetupLaunch(setup, sequenced)
     }
 
-    if (sequencedStartup && this.ptyController?.spawn) {
+    if (effectiveStartup && setupWaitSucceeded && this.ptyController?.spawn) {
       try {
         // Why: automation startup must not depend on a renderer TerminalPane
         // mounting. Runtime-spawned PTYs run immediately and the UI adopts the
@@ -26120,16 +26240,16 @@ export class OrcaRuntimeService {
           await this.markLocalWorkspaceTrustedForAgent(startupTrustAgent, worktreePath)
         }
         const terminal = await this.createTerminal(`id:${worktree.id}`, {
-          command: sequencedStartup.command,
+          command: effectiveStartup.command,
           ...(setup && effectiveStartup
             ? { claudeAgentTeamsSourceCommand: effectiveStartup.command }
             : {}),
-          env: sequencedStartup.env,
-          ...(sequencedStartup.launchConfig ? { launchConfig: sequencedStartup.launchConfig } : {}),
+          env: effectiveStartup.env,
+          ...(effectiveStartup.launchConfig ? { launchConfig: effectiveStartup.launchConfig } : {}),
           ...(effectiveCreatedWithAgent ? { launchAgent: effectiveCreatedWithAgent } : {}),
-          ...(sequencedStartup.viewMode ? { viewMode: sequencedStartup.viewMode } : {}),
-          startupCommandDelivery: sequencedStartup.startupCommandDelivery,
-          telemetry: sequencedStartup.telemetry,
+          ...(effectiveStartup.viewMode ? { viewMode: effectiveStartup.viewMode } : {}),
+          startupCommandDelivery: effectiveStartup.startupCommandDelivery,
+          telemetry: effectiveStartup.telemetry,
           ...ownerSurfacing(shouldActivate)
         })
         if (effectiveDraftPaste) {
@@ -26155,7 +26275,8 @@ export class OrcaRuntimeService {
       // Why: plain CLI creates should not steal the user's current workspace.
       // Explicit activation and hook-running still use renderer activation so
       // the user can watch prompts/output in a visible pane.
-      const runtimeWillProvisionTerminals = didSpawnStartup && Boolean(setup || defaultTabs)
+      const runtimeWillProvisionTerminals =
+        !setupProvisioned && didSpawnStartup && Boolean(setup || defaultTabs)
       if (runtimeWillProvisionTerminals) {
         // Why: once runtime spawned the startup PTY, renderer activation may see
         // an existing terminal and skip setup/default tabs. Await provisioning so
@@ -26171,10 +26292,7 @@ export class OrcaRuntimeService {
           primaryTerminalHandle: startupTerminalHandle,
           hasStartupTerminal: didSpawnStartup,
           setupCommandPlatform: getSetupRunnerCommandPlatformForLaunch(setup, 'posix'),
-          observeSetupCompletion: args.observeSetupCompletion,
-          // Why: carry the wait-for-agent gated setup launch (#6298) so the
-          // Setup tab runs the same script the sequenced agent waits on.
-          ...(sequencedSetup ? { sequencedSetup } : {})
+          observeSetupCompletion: args.observeSetupCompletion
         })
         didSpawnSetup = provisioned.setupSpawned
         setupTerminalHandle = provisioned.setupTerminalHandle
@@ -26182,13 +26300,9 @@ export class OrcaRuntimeService {
       // Why: when runtime spawned setup, omit it from activation. When setup
       // spawn failed, fall through with the wrapped command so renderer
       // activation retries it.
-      const activationSetup = didSpawnSetup
-        ? undefined
-        : didSpawnStartup && sequencedSetup
-          ? sequencedSetup
-          : setup
+      const activationSetup = didSpawnSetup ? undefined : setup
       const activationDefaultTabs = runtimeWillProvisionTerminals ? undefined : defaultTabs
-      if (effectiveStartup && !didSpawnStartup) {
+      if (effectiveStartup && !didSpawnStartup && !setupMustGateStartup) {
         this.notifyActivateWorktree(repo.id, worktree.id, {
           setup: activationSetup,
           startup: effectiveStartup,
@@ -26202,7 +26316,13 @@ export class OrcaRuntimeService {
           navigationTarget: args.navigation
         })
       }
-    } else if (this.ptyController?.spawn && (setup || defaultTabs || didSpawnStartup)) {
+    } else if (
+      !setupProvisioned &&
+      this.ptyController?.spawn &&
+      !didSpawnStartup &&
+      !setup &&
+      !defaultTabs
+    ) {
       // Why: inactive terminal materialization matches normal worktree creation,
       // but setup/default tab failures must not gate automation dispatch.
       const provisioning = this.provisionManagedWorktreeTerminals({
@@ -26215,7 +26335,6 @@ export class OrcaRuntimeService {
         hasStartupTerminal: didSpawnStartup,
         setupCommandPlatform: getSetupRunnerCommandPlatformForLaunch(setup, 'posix'),
         observeSetupCompletion: args.observeSetupCompletion,
-        ...(sequencedSetup ? { sequencedSetup } : {}),
         surfaceOwner: false
       })
       // Why: runtime owns setup spawning here, so the RPC result must omit setup
@@ -26230,7 +26349,7 @@ export class OrcaRuntimeService {
           didSpawnSetup = true
         }
       }
-    } else if (this.ptyController?.spawn) {
+    } else if (this.ptyController?.spawn && !setupProvisioned && !didSpawnStartup) {
       try {
         await this.createTerminal(`id:${worktree.id}`, { surfaceOwner: false })
       } catch (err) {
@@ -26241,11 +26360,7 @@ export class OrcaRuntimeService {
         console.warn(`[worktree-create] ${warning}`)
       }
     }
-    const returnedSetup = didSpawnSetup
-      ? undefined
-      : didSpawnStartup && sequencedSetup
-        ? sequencedSetup
-        : setup
+    const returnedSetup = didSpawnSetup ? undefined : setup
     this.emitWorktreeLifecycle({
       kind: 'created',
       worktreeId: worktree.id,
@@ -26277,9 +26392,13 @@ export class OrcaRuntimeService {
                   ? ('skipped' as const)
                   : // Why: the in-process hook is already executing, so reporting
                     // spawn_failed would strand callers that retry on it.
-                    didSpawnSetup || didStartInProcessSetupHook
-                    ? ('running' as const)
-                    : ('spawn_failed' as const),
+                    setupMustGateStartup && setupProvisioned
+                    ? setupWaitSucceeded
+                      ? ('succeeded' as const)
+                      : ('failed' as const)
+                    : didSpawnSetup || didStartInProcessSetupHook
+                      ? ('running' as const)
+                      : ('spawn_failed' as const),
               ...(setupTerminalHandle ? { terminalHandle: setupTerminalHandle } : {})
             }
           }
@@ -26428,25 +26547,48 @@ export class OrcaRuntimeService {
     let startupTerminalPaneKey: string | null = null
     let startupTerminalPtyId: string | null = null
 
-    let sequencedStartup = args.startup
-    let sequencedSetup: CreateWorktreeResult['setup']
-    if (args.startup && result.setup?.waitForAgentStartup === true) {
-      const platform = getSetupRunnerCommandPlatformForLaunch(result.setup, 'posix')
-      const sequenced = createSequencedSetupAgentCommands({
-        runnerScriptPath: result.setup.runnerScriptPath,
-        startupCommand: args.startup.command,
-        platform,
-        shell: result.setup.shell
-      })
-      sequencedStartup = {
-        ...args.startup,
-        command: sequenced.startupCommand,
-        ...(sequenced.startupEnv ? { env: { ...args.startup.env, ...sequenced.startupEnv } } : {})
+    const setupMustGateStartup = Boolean(args.startup && result.setup?.waitForAgentStartup === true)
+    let setupProvisioned = false
+    let setupWaitSucceeded = !setupMustGateStartup
+
+    // Host-owned sequencing: Setup is a real PTY whose provider exit is the only authorization
+    // to create the Agent PTY. Unknown/lost setup outcomes fail closed; there is no timer that
+    // can silently launch an agent without a successful exit certificate.
+    if (setupMustGateStartup && result.setup && this.ptyController?.spawn) {
+      try {
+        const provisioned = await this.provisionManagedWorktreeTerminals({
+          worktreeSelector: `path:${result.worktree.path}`,
+          worktreeId: result.worktree.id,
+          worktreePath: result.worktree.path,
+          setup: result.setup,
+          ...(result.defaultTabs ? { defaultTabs: result.defaultTabs } : {}),
+          hasStartupTerminal: false,
+          reservePrimaryTerminal: false,
+          setupCommandPlatform: getSetupRunnerCommandPlatformForLaunch(result.setup, 'posix'),
+          observeSetupCompletion: false,
+          ...(shouldActivate ? {} : { surfaceOwner: false })
+        })
+        didSpawnSetup = provisioned.setupSpawned
+        setupTerminalHandle = provisioned.setupTerminalHandle
+        setupProvisioned = provisioned.setupSpawned
+        if (!setupTerminalHandle) {
+          throw new Error('setup_spawn_failed')
+        }
+        const evidence = await this.waitForSetupTerminalEvidence(setupTerminalHandle)
+        setupWaitSucceeded = isSuccessfulSetupExitEvidence(evidence)
+        if (!setupWaitSucceeded) {
+          warning = `Setup did not complete successfully for ${result.worktree.path}; the agent was not started.`
+        }
+      } catch (err) {
+        setupWaitSucceeded = false
+        const message = err instanceof Error ? err.message : String(err)
+        warning = warning
+          ? `${warning} Also setup sequencing could not be proven for ${result.worktree.path}: ${message}`
+          : `Setup sequencing could not be proven for ${result.worktree.path}: ${message}`
       }
-      sequencedSetup = applySequencedSetupLaunch(result.setup, sequenced)
     }
 
-    if (sequencedStartup && this.ptyController?.spawn) {
+    if (args.startup && setupWaitSucceeded && this.ptyController?.spawn) {
       try {
         const startupTrustAgent = args.startupDraftPaste?.agent ?? args.createdWithAgent
         if (startupTrustAgent) {
@@ -26457,16 +26599,16 @@ export class OrcaRuntimeService {
           )
         }
         const terminal = await this.createTerminal(`path:${result.worktree.path}`, {
-          command: sequencedStartup.command,
+          command: args.startup.command,
           ...(result.setup && args.startup
             ? { claudeAgentTeamsSourceCommand: args.startup.command }
             : {}),
-          env: sequencedStartup.env,
-          ...(sequencedStartup.launchConfig ? { launchConfig: sequencedStartup.launchConfig } : {}),
+          env: args.startup.env,
+          ...(args.startup.launchConfig ? { launchConfig: args.startup.launchConfig } : {}),
           ...(args.createdWithAgent ? { launchAgent: args.createdWithAgent } : {}),
-          ...(sequencedStartup.viewMode ? { viewMode: sequencedStartup.viewMode } : {}),
-          startupCommandDelivery: sequencedStartup.startupCommandDelivery,
-          telemetry: sequencedStartup.telemetry,
+          ...(args.startup.viewMode ? { viewMode: args.startup.viewMode } : {}),
+          startupCommandDelivery: args.startup.startupCommandDelivery,
+          telemetry: args.startup.telemetry,
           ...ownerSurfacing(shouldActivate)
         })
         if (args.startupDraftPaste) {
@@ -26490,7 +26632,7 @@ export class OrcaRuntimeService {
 
     if (shouldActivate) {
       const runtimeWillProvisionTerminals =
-        didSpawnStartup && Boolean(result.setup || result.defaultTabs)
+        !setupProvisioned && didSpawnStartup && Boolean(result.setup || result.defaultTabs)
       if (runtimeWillProvisionTerminals) {
         // Why: remote/mobile task creates spawn the agent terminal in runtime,
         // so renderer activation may not materialize setup/default tabs. Await so
@@ -26504,23 +26646,16 @@ export class OrcaRuntimeService {
           primaryTerminalHandle: startupTerminalHandle,
           hasStartupTerminal: didSpawnStartup,
           setupCommandPlatform: getSetupRunnerCommandPlatformForLaunch(result.setup, 'posix'),
-          observeSetupCompletion: args.observeSetupCompletion,
-          // Why: carry the wait-for-agent gated setup launch (#6298) so the
-          // remote Setup tab runs the same script the sequenced agent waits on.
-          ...(sequencedSetup ? { sequencedSetup } : {})
+          observeSetupCompletion: args.observeSetupCompletion
         })
         didSpawnSetup = provisioned.setupSpawned
         setupTerminalHandle = provisioned.setupTerminalHandle
       }
       // Why: omit setup from activation when runtime spawned it; on spawn
       // failure fall through with the wrapped command so renderer retries.
-      const activationSetup = didSpawnSetup
-        ? undefined
-        : didSpawnStartup && sequencedSetup
-          ? sequencedSetup
-          : result.setup
+      const activationSetup = didSpawnSetup ? undefined : result.setup
       const activationDefaultTabs = runtimeWillProvisionTerminals ? undefined : result.defaultTabs
-      if (args.startup && !didSpawnStartup) {
+      if (args.startup && !didSpawnStartup && !setupMustGateStartup) {
         this.notifyActivateWorktree(repo.id, result.worktree.id, {
           setup: activationSetup,
           startup: args.startup,
@@ -26539,7 +26674,10 @@ export class OrcaRuntimeService {
     if (
       !shouldActivate &&
       this.ptyController?.spawn &&
-      (result.setup || result.defaultTabs || didSpawnStartup)
+      !setupProvisioned &&
+      !didSpawnStartup &&
+      !result.setup &&
+      !result.defaultTabs
     ) {
       // Why: inactive terminal materialization matches normal worktree creation,
       // but setup/default tab failures must not gate automation dispatch.
@@ -26553,7 +26691,6 @@ export class OrcaRuntimeService {
         hasStartupTerminal: didSpawnStartup,
         setupCommandPlatform: getSetupRunnerCommandPlatformForLaunch(result.setup, 'posix'),
         observeSetupCompletion: args.observeSetupCompletion,
-        ...(sequencedSetup ? { sequencedSetup } : {}),
         surfaceOwner: false
       })
       // Why: runtime owns setup spawning here, so omit setup from the RPC result
@@ -26568,7 +26705,12 @@ export class OrcaRuntimeService {
           didSpawnSetup = true
         }
       }
-    } else if (!shouldActivate && this.ptyController?.spawn) {
+    } else if (
+      !shouldActivate &&
+      this.ptyController?.spawn &&
+      !setupProvisioned &&
+      !didSpawnStartup
+    ) {
       try {
         await this.createTerminal(`path:${result.worktree.path}`, { surfaceOwner: false })
       } catch (err) {
@@ -26579,11 +26721,7 @@ export class OrcaRuntimeService {
       }
     }
 
-    const returnedSetup = didSpawnSetup
-      ? undefined
-      : didSpawnStartup && sequencedSetup
-        ? sequencedSetup
-        : result.setup
+    const returnedSetup = didSpawnSetup ? undefined : result.setup
     const resultForRenderer = returnedSetup
       ? { ...result, setup: returnedSetup }
       : (() => {
@@ -26618,9 +26756,13 @@ export class OrcaRuntimeService {
           ? ('skipped' as const)
           : !result.setup
             ? ('not_configured' as const)
-            : didSpawnSetup
-              ? ('running' as const)
-              : ('spawn_failed' as const),
+            : setupMustGateStartup && setupProvisioned
+              ? setupWaitSucceeded
+                ? ('succeeded' as const)
+                : ('failed' as const)
+              : didSpawnSetup
+                ? ('running' as const)
+                : ('spawn_failed' as const),
       ...(setupTerminalHandle ? { terminalHandle: setupTerminalHandle } : {})
     }
     const resultWithSetupReceipt = args.awaitTerminalProvisioning
@@ -29146,6 +29288,7 @@ export class OrcaRuntimeService {
             command: sequencedStartupCommand
               ? launchOpts.command
               : (agentTeamsPlan?.command ?? launchOpts.command),
+            ...(launchOpts.directExec ? { directExec: launchOpts.directExec } : {}),
             launchAgent: launchOpts.launchAgent,
             commandDelivery: 'provider',
             startupCommandDelivery: launchOpts.startupCommandDelivery,
@@ -36520,13 +36663,13 @@ export class OrcaRuntimeService {
     return this.getLeavesForPty(ptyId).some((leaf) => getTerminalState(leaf) === 'exited')
   }
 
-  private notifyPtyExitListeners(ptyId: string): void {
+  private notifyPtyExitListeners(ptyId: string, event: RuntimePtyExitEvent): void {
     const listeners = this.ptyExitListenersByPtyId.get(ptyId)
     if (!listeners) {
       return
     }
     this.ptyExitListenersByPtyId.delete(ptyId)
-    notifyRuntimeListeners(listeners, (listener) => listener(), 'pty-exit')
+    notifyRuntimeListeners(listeners, (listener) => listener(event), 'pty-exit')
   }
 
   private resolvePtyTuiIdleWaiters(pty: RuntimePtyWorktreeRecord, ptyId: string): void {

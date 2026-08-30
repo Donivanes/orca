@@ -854,7 +854,11 @@ export class LocalPtyProvider implements IPtyProvider {
           // Why: on zsh→bash fallback HISTFILE still points to zsh_history; update before spawn so the child inherits it (design doc §8).
           onBeforeFallbackSpawn: historyResult?.historyDir
             ? (env, fallbackShell) =>
-                updateHistoryEnvForFallback(env, fallbackShell, historyResult as HistoryInjectionResult)
+                updateHistoryEnvForFallback(
+                  env,
+                  fallbackShell,
+                  historyResult as HistoryInjectionResult
+                )
             : undefined,
           windowsFallbackAttempts
         })

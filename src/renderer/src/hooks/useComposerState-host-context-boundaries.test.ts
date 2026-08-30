@@ -20,6 +20,7 @@ const COMPOSER_SOURCE = {
   derived: readComposerModule('derived-composer-state.ts'),
   folderSubmit: readComposerModule('folder-submit-orchestration.ts'),
   fullCreation: readComposerModule('full-creation-execution.ts'),
+  fullCreationStartupPayload: readComposerModule('full-creation-startup-payload.ts'),
   fullSubmitOrchestration: readComposerModule('full-submit-orchestration.ts'),
   fullSubmitPreparation: readComposerModule('full-submit-preparation.ts'),
   fullSubmitSourcePreparation: readComposerModule('full-submit-source-preparation.ts'),
@@ -650,7 +651,7 @@ describe('useComposerState host-context boundaries', () => {
     expect(section).not.toContain('getRuntimeRepoBaseRefDefault')
   })
 
-  it('plans new workspace agent startup from the selected repo runtime', () => {
+  it('separates host-specific terminal planning from client structured-route eligibility', () => {
     expect(COMPOSER_SOURCE.runtimeTarget).toContain(
       'const selectedRepoAgentLaunchPlatform = useMemo'
     )
@@ -659,25 +660,32 @@ describe('useComposerState host-context boundaries', () => {
       'getAgentLaunchPlatformForRepo(selectedRepo, projectRuntime)'
     )
 
-    const fullSubmit = COMPOSER_SOURCE.fullSubmitPreparation + COMPOSER_SOURCE.fullCreation
-    expect(fullSubmit).toContain('platform: selectedRepoAgentLaunchPlatform')
-    expect(fullSubmit).toContain('startupDraft: startupPlan.draftPrompt')
-    expect(fullSubmit).not.toContain('platform: CLIENT_PLATFORM')
+    expect(COMPOSER_SOURCE.fullSubmitPreparation).toContain(
+      'platform: selectedRepoAgentLaunchPlatform'
+    )
+    expect(COMPOSER_SOURCE.fullSubmitPreparation).not.toContain('platform: CLIENT_PLATFORM')
+
+    expect(COMPOSER_SOURCE.fullCreation).toContain('resolveAgentLaunchRoute({')
+    expect(COMPOSER_SOURCE.fullCreation).toContain('platform: CLIENT_PLATFORM')
+    expect(COMPOSER_SOURCE.fullCreation).toContain('startupDraft: startupPlan.draftPrompt')
 
     const quickSubmit = COMPOSER_SOURCE.quickCreation
     expect(quickSubmit).toContain('platform: selectedRepoAgentLaunchPlatform')
-    expect(quickSubmit).not.toContain('platform: CLIENT_PLATFORM')
+    expect(quickSubmit).toContain('resolveAgentLaunchRoute({')
+    expect(quickSubmit).toContain('platform: CLIENT_PLATFORM')
   })
 
   // Why: activation no longer rebuilds a startup from `createdWithAgent`, so this
-  // caller's own `startup` is the only thing that launches the agent it planned.
-  it('passes its own startup to activation when submit planned an agent', () => {
+  // caller's own startup payload is the only thing that launches the agent it planned.
+  it('passes its own terminal startup payload to activation when submit planned an agent', () => {
     const activation = COMPOSER_SOURCE.fullCreation
+    const startupPayload = COMPOSER_SOURCE.fullCreationStartupPayload
 
-    expect(activation).toContain('...(startupPlan && !backendSpawnedStartup')
+    expect(activation).toContain('startup: buildFullCreationStartupPayload({')
     expect(activation).toContain('backendStartupTerminalSpawned: true')
-    expect(activation).toContain('command: startupPlan.launchCommand')
-    expect(activation).toContain('launchAgent: tuiAgent')
+    expect(startupPayload).toContain('if (!startupPlan || args.backendSpawnedStartup)')
+    expect(startupPayload).toContain('command: startupPlan.launchCommand')
+    expect(startupPayload).toContain('launchAgent: args.tuiAgent')
     // The removed activation-time fallback must not come back through this caller.
     expect(COMPOSER_SOURCE.fullCreation).not.toContain('buildCreatedAgentReopenStartup')
   })
@@ -726,7 +734,11 @@ describe('useComposerState host-context boundaries', () => {
     )
     expect(fullSubmit).toContain('prompt: submitStartupPrompt')
     expect(fullSubmit).toContain('const shouldSeedInitialAgentStatus =')
-    expect(fullSubmit).toContain('...(shouldSeedInitialAgentStatus')
+    expect(COMPOSER_SOURCE.fullCreation).toContain('shouldSeedInitialAgentStatus,')
+    expect(COMPOSER_SOURCE.fullCreationStartupPayload).toContain(
+      'args.shouldSeedInitialAgentStatus'
+    )
+    expect(COMPOSER_SOURCE.fullCreationStartupPayload).toContain('initialAgentStatus: {')
 
     const quickSubmit =
       COMPOSER_SOURCE.quickSubmitPreparation +

@@ -185,6 +185,23 @@ describe('worktree agent activation seam', () => {
     expect(tabs[0]?.ptyId).toBeNull()
   })
 
+  it('re-seeds an explicitly activated workspace with a closed terminal tombstone', async () => {
+    const worktree = makeWorktree()
+    useAppStore.setState({
+      ...baseState(),
+      // An empty row is persisted after the user closes the last terminal.
+      tabsByWorktree: { [worktree.id]: [] }
+    })
+    stubInventory()
+
+    expect(activateAndRevealWorktree(worktree.id)).toEqual({ primaryTabId: null })
+    await waitForWorktreeAgentActivationGateForTests(worktree.id)
+
+    const tabs = useAppStore.getState().tabsByWorktree[worktree.id] ?? []
+    expect(tabs).toHaveLength(1)
+    expect(tabs[0]?.ptyId).toBeNull()
+  })
+
   it('does not spawn before a structured chat tab hydrates', async () => {
     const worktree = makeWorktree()
     useAppStore.setState(baseState())

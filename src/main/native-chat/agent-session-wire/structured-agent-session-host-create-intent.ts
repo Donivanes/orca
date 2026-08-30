@@ -15,9 +15,9 @@ import {
 } from './structured-agent-session-attach'
 import type {
   StructuredAgentSessionHostDeps,
-  StructuredAgentSessionHostSession
+  StructuredAgentSessionHostSession,
+  StructuredAgentSessionCaller
 } from './structured-agent-session-host-types'
-import type { StructuredAgentSessionCaller } from './structured-agent-session-host-types'
 
 type CreateIntentContext = {
   deps: StructuredAgentSessionHostDeps

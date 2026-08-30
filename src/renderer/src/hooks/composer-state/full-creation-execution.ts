@@ -45,8 +45,7 @@ import { CLIENT_PLATFORM } from '@/lib/new-workspace'
 import { startStructuredCodexLaunch } from '@/lib/structured-agent-session-launch'
 import { StructuredAgentSessionCreateRefusalError } from '@/lib/launch-structured-codex-session'
 import { buildFullCreationStartupPayload } from './full-creation-startup-payload'
-import { continueFullCreationActivation } from './full-creation-post-activation'
-import { focusPublishedStructuredSession } from './full-creation-post-activation'
+import * as post from './full-creation-post-activation'
 import { claimFullCreationStructuredRefusalFallback } from './full-creation-structured-refusal'
 import { buildFullCreationIssueCommand } from './full-creation-issue-command'
 
@@ -233,7 +232,7 @@ export function useFullCreationExecution(input: FullCreationExecutionInput) {
           : {})
       })
 
-      continueFullCreationActivation({
+      post.continueFullCreationActivation({
         worktreeId: worktree.id,
         activation,
         startupPlan,
@@ -269,7 +268,7 @@ export function useFullCreationExecution(input: FullCreationExecutionInput) {
             : {})
         })
         try {
-          focusPublishedStructuredSession(worktree.id, (await launch.launchResult).sessionId)
+          post.focusPublishedStructuredSession(worktree.id, (await launch.launchResult).sessionId)
         } catch (error) {
           if (!(error instanceof StructuredAgentSessionCreateRefusalError)) {
             setSidebarOpen(true)

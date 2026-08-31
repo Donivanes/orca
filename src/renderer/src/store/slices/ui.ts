@@ -911,6 +911,10 @@ export type UISlice = {
   dismissUsageEmptyState: () => void
   groupBy: 'none' | 'workspace-status' | 'repo' | 'pr-status'
   setGroupBy: (g: UISlice['groupBy']) => void
+  // Which list the sidebar body shows. Unlike activeView this never swaps the
+  // center or right sidebar — the agents list is a navigator, not a destination.
+  sidebarBody: 'workspaces' | 'agents'
+  setSidebarBody: (body: UISlice['sidebarBody']) => void
   sortBy: 'name' | 'smart' | 'recent' | 'repo' | 'manual'
   setSortBy: (s: UISlice['sortBy']) => void
   projectOrderBy: ProjectOrderBy
@@ -2128,6 +2132,9 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set, get)
     window.api.ui.set({ groupBy: g, collapsedGroups: [] }).catch(console.error)
     set({ groupBy: g, collapsedGroups: new Set<string>() })
   },
+
+  sidebarBody: 'workspaces',
+  setSidebarBody: (body) => set({ sidebarBody: body }),
 
   sortBy: 'recent',
   setSortBy: (s) => set({ sortBy: s }),

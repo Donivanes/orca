@@ -28,6 +28,41 @@ export type ProcessTableRow = {
   command: string
 }
 
+export type ProcessTableIndex = Readonly<{
+  rowsByPid: ReadonlyMap<number, ProcessTableRow>
+  childrenByParent: ReadonlyMap<number, readonly ProcessTableRow[]>
+}>
+
+const processTableIndexes = new WeakMap<readonly ProcessTableRow[], ProcessTableIndex>()
+
+/**
+ * Index one immutable process-table snapshot for repeated descendant lookups.
+ * The WeakMap is keyed by snapshot identity, so the index expires with the TTL
+ * cache without retaining process rows beyond their normal lifetime.
+ */
+export function getProcessTableIndex(rows: readonly ProcessTableRow[]): ProcessTableIndex {
+  const cached = processTableIndexes.get(rows)
+  if (cached) {
+    return cached
+  }
+
+  const rowsByPid = new Map<number, ProcessTableRow>()
+  const childrenByParent = new Map<number, ProcessTableRow[]>()
+  for (const row of rows) {
+    // Preserve rows.find() semantics if a malformed table repeats a pid.
+    if (!rowsByPid.has(row.pid)) {
+      rowsByPid.set(row.pid, row)
+    }
+    const children = childrenByParent.get(row.ppid) ?? []
+    children.push(row)
+    childrenByParent.set(row.ppid, children)
+  }
+
+  const index: ProcessTableIndex = { rowsByPid, childrenByParent }
+  processTableIndexes.set(rows, index)
+  return index
+}
+
 /**
  * Parse `ps -axo pid=,ppid=,stat=,command=` output into rows. Tolerates CRLF so
  * a snapshot parsed on any host stays correct; `command` (last field) keeps its

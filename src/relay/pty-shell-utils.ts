@@ -10,7 +10,12 @@ import {
   recognizeAgentProcessFromCommandLine
 } from '../shared/agent-process-recognition'
 import { getFirstCommandToken } from '../shared/command-token-scanner'
-import { getProcessTableSnapshot, type ProcessTableRow } from '../shared/process-table-snapshot'
+import {
+  getProcessTableIndex,
+  getProcessTableSnapshot,
+  type ProcessTableIndex,
+  type ProcessTableRow
+} from '../shared/process-table-snapshot'
 import {
   resolveOuterWrapperForegroundProcess,
   shouldInspectOuterWrapperForegroundProcess
@@ -194,22 +199,15 @@ export function isProcessAlive(pid: number): boolean {
 }
 
 function collectDescendants(
-  rows: ProcessTableRow[],
+  index: ProcessTableIndex,
   rootPid: number
 ): (ProcessTableRow & { depth: number })[] {
-  const childrenByParent = new Map<number, ProcessTableRow[]>()
-  for (const row of rows) {
-    const children = childrenByParent.get(row.ppid) ?? []
-    children.push(row)
-    childrenByParent.set(row.ppid, children)
-  }
-
   const descendants: (ProcessTableRow & { depth: number })[] = []
-  const stack = (childrenByParent.get(rootPid) ?? []).map((row) => ({ row, depth: 1 }))
+  const stack = (index.childrenByParent.get(rootPid) ?? []).map((row) => ({ row, depth: 1 }))
   while (stack.length > 0) {
     const { row, depth } = stack.pop()!
     descendants.push({ ...row, depth })
-    for (const child of childrenByParent.get(row.pid) ?? []) {
+    for (const child of index.childrenByParent.get(row.pid) ?? []) {
       stack.push({ row: child, depth: depth + 1 })
     }
   }
@@ -237,8 +235,9 @@ async function getRecognizedForegroundDescendant(
 ): Promise<string | null> {
   try {
     const rows = await getProcessTableSnapshot()
-    const root = rows.find((row) => row.pid === pid)
-    const candidates = collectDescendants(rows, pid).sort(
+    const index = getProcessTableIndex(rows)
+    const root = index.rowsByPid.get(pid)
+    const candidates = collectDescendants(index, pid).sort(
       (a, b) => candidateScore(b) - candidateScore(a)
     )
     // Why: SSH relays do not have the daemon's async wrapper cache. Inspect the

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { createProcessTableSnapshotReader, parseProcessTableRows } from './process-table-snapshot'
+import {
+  createProcessTableSnapshotReader,
+  getProcessTableIndex,
+  parseProcessTableRows
+} from './process-table-snapshot'
 
 function deferred<T>(): {
   promise: Promise<T>
@@ -213,5 +217,27 @@ describe('parseProcessTableRows', () => {
   it('tolerates CRLF and skips header/blank/non-matching lines', () => {
     const rows = parseProcessTableRows('  PID PPID STAT COMMAND\r\n42 1 Ss /sbin/launchd\r\n\r\n')
     expect(rows).toEqual([{ pid: 42, ppid: 1, stat: 'Ss', command: '/sbin/launchd' }])
+  })
+})
+
+describe('getProcessTableIndex', () => {
+  it('reuses one parent/child index for the same snapshot identity', () => {
+    const rows = parseProcessTableRows(
+      ['100 1 Ss bash', '101 100 S node codex', '102 100 S vim'].join('\n')
+    )
+
+    const first = getProcessTableIndex(rows)
+    const second = getProcessTableIndex(rows)
+
+    expect(second).toBe(first)
+    expect(first.rowsByPid.get(100)).toBe(rows[0])
+    expect(first.childrenByParent.get(100)).toEqual([rows[1], rows[2]])
+  })
+
+  it('does not reuse an index across distinct snapshot arrays', () => {
+    const firstRows = parseProcessTableRows('100 1 Ss bash')
+    const secondRows = parseProcessTableRows('100 1 Ss bash')
+
+    expect(getProcessTableIndex(secondRows)).not.toBe(getProcessTableIndex(firstRows))
   })
 })

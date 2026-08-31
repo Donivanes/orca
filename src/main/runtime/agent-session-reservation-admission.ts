@@ -120,6 +120,28 @@ export function admitPendingAgentSessionReservationReplay(
   return record
 }
 
+export function replayAgentSessionReservation(
+  state: AgentSessionStoreState,
+  request: AgentSessionReserveRequest,
+  row: AgentSessionOperationRow,
+  leaseTtlMs: number
+): AgentSessionReserveResult {
+  if (
+    row.outcome.status === 'pending' &&
+    !state.records.has(request.sessionId) &&
+    request.expectedFence === null
+  ) {
+    const result = applyAgentSessionReservation(state, request, leaseTtlMs)
+    state.records.set(result.record.sessionId, result.record)
+    return { ...result, operationRow: row }
+  }
+  let record = requireAgentSessionRecordForReplay(state, row, request.sessionId)
+  if (row.outcome.status === 'pending' && request.handoffOperationId !== null) {
+    record = admitPendingAgentSessionReservationReplay(record, request)
+  }
+  return { record, disposition: 'replayed' as const, operationRow: row }
+}
+
 export function applyAgentSessionReservation(
   state: AgentSessionStoreState,
   request: AgentSessionReserveRequest,

@@ -49,12 +49,11 @@ import {
   type AgentSessionReservationProcesslessProof
 } from './agent-session-processless-reservation'
 import {
-  admitPendingAgentSessionReservationReplay,
   applyAgentSessionReservation,
   evaluateAgentSessionReserveOperation,
-  requireAgentSessionRecordForReplay,
   type AgentSessionReserveRequest,
-  type AgentSessionReserveResult
+  type AgentSessionReserveResult,
+  replayAgentSessionReservation
 } from './agent-session-reservation-admission'
 import {
   agentSessionStoreRevision,
@@ -174,24 +173,12 @@ export class AgentSessionRecordStore {
         throw new Error(decision.code)
       }
       if (decision.decision === 'replay') {
-        if (
-          decision.row.outcome.status === 'pending' &&
-          !this.state.records.has(request.sessionId) &&
-          request.expectedFence === null
-        ) {
-          const result = applyAgentSessionReservation(
-            this.state,
-            request,
-            AGENT_SESSION_LEASE_TTL_MS
-          )
-          this.state.records.set(result.record.sessionId, result.record)
-          return { ...result, operationRow: decision.row }
-        }
-        let record = requireAgentSessionRecordForReplay(this.state, decision.row, request.sessionId)
-        if (decision.row.outcome.status === 'pending' && request.handoffOperationId !== null) {
-          record = admitPendingAgentSessionReservationReplay(record, request)
-        }
-        return { record, disposition: 'replayed' as const, operationRow: decision.row }
+        return replayAgentSessionReservation(
+          this.state,
+          request,
+          decision.row,
+          AGENT_SESSION_LEASE_TTL_MS
+        )
       }
       const result = applyAgentSessionReservation(this.state, request, AGENT_SESSION_LEASE_TTL_MS)
       this.state.operations.set(

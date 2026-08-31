@@ -153,4 +153,17 @@ describe('NativeChatToolRun', () => {
     expect(container.querySelector('.text-destructive')).toBeInTheDocument()
     expect(screen.queryByText('exit 1')).toBeNull()
   })
+
+  it('settles an orphaned running call when its turn lifecycle has ended', () => {
+    const blocks: NativeChatBlock[] = [
+      { type: 'tool-call', name: 'shell', input: { command: 'sleep 1' }, state: 'running' }
+    ]
+
+    const { container } = render(
+      <NativeChatToolRun blocks={blocks} expandSignal={false} activeTurnIsWorking={false} />
+    )
+
+    expect(screen.queryByText('Running sleep 1')).toBeNull()
+    expect(container.querySelector('.text-destructive')).toBeInTheDocument()
+  })
 })

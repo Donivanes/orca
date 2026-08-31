@@ -196,11 +196,14 @@ function ToolLine({ block }: { block: NativeChatBlock }): React.JSX.Element | nu
  *  toolbar toggle drive every run at once while still allowing per-run override. */
 export function NativeChatToolRun({
   blocks,
-  expandSignal
+  expandSignal,
+  activeTurnIsWorking
 }: {
   blocks: NativeChatBlock[]
   /** Toolbar-driven desired open state. Each change re-syncs this run's state. */
   expandSignal: boolean
+  /** Structured lifecycle state, when available, keeps orphaned running calls from spinning. */
+  activeTurnIsWorking?: boolean
 }): React.JSX.Element {
   const [open, setOpen] = useState(expandSignal)
   // Re-sync when the global toolbar toggle flips.
@@ -209,11 +212,14 @@ export function NativeChatToolRun({
   const callCount = countToolCalls(blocks) || blocks.length
   const summary = summarizeToolRun(blocks)
   const calls = blocks.filter(isToolCallBlock)
-  const activeCalls = calls.filter((call) => call.state === 'running')
+  const activeCalls = calls.filter(
+    (call) => call.state === 'running' && activeTurnIsWorking !== false
+  )
   const latestActiveCall = activeCalls.at(-1)
   const activeSummary = activeToolSummary(calls)
   const hasFailure =
     calls.some((call) => call.state === 'failed') ||
+    (activeTurnIsWorking === false && calls.some((call) => call.state === 'running')) ||
     blocks.some((block) => isToolResultBlock(block) && block.isError)
   const fallbackLabel =
     callCount === 1

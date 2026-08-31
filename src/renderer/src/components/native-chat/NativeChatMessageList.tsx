@@ -152,6 +152,7 @@ export function ProviderFrameRow({ block }: { block: NativeChatBlock }): React.J
 function MessageRow({
   message,
   expandSignal,
+  activeTurnIsWorking,
   onScrollMessageToTop,
   onLinkClick,
   allowFileUriLinks = false,
@@ -159,6 +160,7 @@ function MessageRow({
 }: {
   message: NativeChatMessage
   expandSignal: boolean
+  activeTurnIsWorking?: boolean
   /** Align this message's top to the top of the scroll viewport. */
   onScrollMessageToTop: (el: HTMLElement) => void
   onLinkClick?: CommentMarkdownLinkClickHandler
@@ -257,7 +259,13 @@ function MessageRow({
           allowFileUriLinks={allowFileUriLinks}
         />
       ) : null}
-      {tools.length > 0 ? <NativeChatToolRun blocks={tools} expandSignal={expandSignal} /> : null}
+      {tools.length > 0 ? (
+        <NativeChatToolRun
+          blocks={tools}
+          expandSignal={expandSignal}
+          activeTurnIsWorking={activeTurnIsWorking}
+        />
+      ) : null}
       {showControls ? (
         <AgentControls
           markdown={markdown}
@@ -435,6 +443,7 @@ export function NativeChatMessageList({
               key={message.id}
               message={message}
               expandSignal={expandSignal}
+              activeTurnIsWorking={session.transcriptLifecycle?.state === 'working'}
               onScrollMessageToTop={scrollMessageToTop}
               onLinkClick={onLinkClick}
               allowFileUriLinks={allowFileUriLinks}

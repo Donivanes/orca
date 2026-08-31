@@ -6302,7 +6302,12 @@ export class OrcaRuntimeService {
     if (current?.db === db) {
       return current.promise
     }
-    const sync = syncFederatedDispatch(this, dispatchId)
+    const generation = this.orchestrationFederationRelayGeneration
+    const sync = syncFederatedDispatch(
+      this,
+      dispatchId,
+      () => generation === this.orchestrationFederationRelayGeneration
+    )
       .then(() => {
         if (this.orchestrationFederationSyncs.get(dispatchId)?.promise === sync) {
           this.orchestrationFederationWarnings.delete(dispatchId)

@@ -234,7 +234,7 @@ export class SshPtyProvider implements IPtyProvider {
       incarnationId?: string
     }
   ): Promise<PtyShutdownResult | void> {
-    const result = await this.mux.request(
+    const result = (await this.mux.request(
       'pty.shutdown',
       {
         id: this.toRelayPtyId(id),
@@ -244,11 +244,11 @@ export class SshPtyProvider implements IPtyProvider {
         incarnationId: opts.incarnationId
       },
       relayTimeoutOptions(opts.deadlineMs)
-    )
+    )) as PtyShutdownResult | void
     if (result?.fenceUnavailable !== true) {
       this.livePtyIds.delete(id)
     }
-    return result as PtyShutdownResult | void
+    return result
   }
 
   async sendSignal(id: string, signal: string): Promise<void> {

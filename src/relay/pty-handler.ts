@@ -1955,7 +1955,9 @@ export class PtyHandler {
     return { cols: managed.pty.cols, rows: managed.pty.rows }
   }
 
-  private async shutdown(params: Record<string, unknown>): Promise<void> {
+  private async shutdown(
+    params: Record<string, unknown>
+  ): Promise<{ fenceUnavailable: true } | void> {
     const id = params.id as string
     const immediate = params.immediate as boolean
     const incarnationId =
@@ -1965,7 +1967,8 @@ export class PtyHandler {
       return
     }
     if (incarnationId && managed.incarnationId && incarnationId !== managed.incarnationId) {
-      throw new Error('session was replaced')
+      // Preserve the live replacement; callers must classify this as a fence refusal.
+      return { fenceUnavailable: true }
     }
     // Why: `pty.shutdown` is the only authoritative statement this host ever gets that a tab is
     // gone. Record it before the kill request, because the kill is the part that can fail: an agent

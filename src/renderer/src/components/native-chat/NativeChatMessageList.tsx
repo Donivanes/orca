@@ -443,7 +443,14 @@ export function NativeChatMessageList({
               key={message.id}
               message={message}
               expandSignal={expandSignal}
-              activeTurnIsWorking={session.transcriptLifecycle?.state === 'working'}
+              // A missing transcript lifecycle is not evidence that the turn
+              // ended. Structured sessions and legacy live hooks still expose
+              // the authoritative session-level working state.
+              activeTurnIsWorking={
+                session.transcriptLifecycle
+                  ? session.transcriptLifecycle.state === 'working'
+                  : isWorking
+              }
               onScrollMessageToTop={scrollMessageToTop}
               onLinkClick={onLinkClick}
               allowFileUriLinks={allowFileUriLinks}

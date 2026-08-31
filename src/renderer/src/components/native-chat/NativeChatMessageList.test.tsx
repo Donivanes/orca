@@ -49,4 +49,38 @@ describe('NativeChatMessageList assistant messages', () => {
     expect(controls).not.toHaveClass('absolute')
     expect(prose.compareDocumentPosition(controls!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
   })
+
+  it('keeps a running tool live when transcript lifecycle metadata is absent', () => {
+    render(
+      <NativeChatMessageList
+        session={{
+          ...session,
+          status: 'working',
+          messages: [
+            {
+              id: 'assistant-tool-1',
+              role: 'assistant',
+              blocks: [
+                {
+                  type: 'tool-call',
+                  name: 'shell',
+                  input: { command: 'sleep 5' },
+                  state: 'running'
+                }
+              ],
+              timestamp: 1,
+              source: 'transcript'
+            }
+          ]
+        }}
+        isWorking
+        expandSignal={false}
+        fontScale={1}
+      />
+    )
+
+    expect(screen.getByText('Running sleep 5')).toBeInTheDocument()
+    expect(screen.queryByText('1×')).toBeNull()
+    expect(document.querySelector('.text-destructive')).toBeNull()
+  })
 })

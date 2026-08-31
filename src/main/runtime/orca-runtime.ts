@@ -20939,7 +20939,7 @@ export class OrcaRuntimeService {
     const incarnationId = live?.pty.incarnationId ?? this.ptysById.get(ptyId)?.incarnationId
     return {
       ptyId,
-      processIncarnation: incarnationId ?? `${ptyId}:${generation}`,
+      processIncarnation: incarnationId ?? `${this.runtimeId}:${ptyId}:${generation}`,
       generation
     }
   }

@@ -1263,9 +1263,9 @@ async function prepareCodexRuntimeHomeForLaunch(
       ? ((await codexHookService.installForRuntimeHome(runtimeHomePath, hookTarget)) ??
         // Why: a managed account's launch home is its own self-contained
         // CODEX_HOME, so hooks/trust must install there, not the shared mirror.
-        (await codexHookService.install(runtimeHomePath ?? undefined)))
+        (await codexHookService.installForLaunchPrep(runtimeHomePath ?? undefined)))
       : (codexHookService.refreshRuntimeUserHooksForRuntimeHome(runtimeHomePath, hookTarget) ??
-        (await codexHookService.refreshRuntimeUserHooks(runtimeHomePath ?? undefined)))
+        (await codexHookService.refreshRuntimeUserHooksForLaunchPrep(runtimeHomePath ?? undefined)))
     if (status.state === 'error') {
       console.warn(
         `[codex-hook-service] failed to ${
@@ -1375,9 +1375,9 @@ async function prepareCodexSessionResumeForLaunch(args: {
             userDataPath: app.getPath('userData')
           })
         } else if (hooksEnabled) {
-          await codexHookService.install(resumeHome)
+          await codexHookService.installForLaunchPrep(resumeHome)
         } else {
-          await codexHookService.refreshRuntimeUserHooks(resumeHome)
+          await codexHookService.refreshRuntimeUserHooksForLaunchPrep(resumeHome)
         }
       } catch (error) {
         // Why: hook repair is best-effort; session provenance must still win over the currently selected home.

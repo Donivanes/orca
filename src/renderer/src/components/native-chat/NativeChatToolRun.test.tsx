@@ -90,19 +90,20 @@ describe('NativeChatToolRun', () => {
     expect(container.querySelector('pre')).toBeNull()
   })
 
-  it('shows only the latest active tool after grouping adjacent structured calls', () => {
+  it('keeps a grouped active run to one stable row showing only the latest tool', () => {
     const blocks: NativeChatBlock[] = [
       { type: 'tool-call', name: 'shell', input: { command: 'date' }, state: 'completed' },
       { type: 'tool-call', name: 'shell', input: { command: 'pwd' }, state: 'completed' },
       { type: 'tool-call', name: 'shell', input: { command: 'cat package.json' }, state: 'running' }
     ]
 
-    render(<NativeChatToolRun blocks={blocks} expandSignal={false} />)
+    const { container } = render(<NativeChatToolRun blocks={blocks} expandSignal={false} />)
 
-    expect(screen.getByText('Ran 3 commands and used 1 tool')).toBeInTheDocument()
     expect(screen.getByText('Running cat package.json')).toBeInTheDocument()
     expect(screen.queryByText('Running date')).toBeNull()
     expect(screen.queryByText('Running pwd')).toBeNull()
+    expect(screen.queryByText('Ran 3 commands and used 1 tool')).toBeNull()
+    expect(container.querySelector('.animate-spin')).toBeNull()
   })
 
   it('keeps a completed tool payload collapsed until the run is expanded', () => {

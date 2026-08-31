@@ -21,6 +21,7 @@ import { NativeChatToolRun } from './NativeChatToolRun'
 import { NativeChatCopyButton } from './NativeChatCopyButton'
 import { shouldShowNativeChatTypingIndicator } from './native-chat-typing-indicator'
 import { nativeChatProviderFrameSummary } from '../../../../shared/native-chat-provider-frame-summary'
+import { NativeChatWorkingStatus } from './NativeChatWorkingStatus'
 
 function geometryOf(el: HTMLElement): ScrollGeometry {
   return { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight }
@@ -93,27 +94,6 @@ function AgentControls({
       >
         <ArrowUp className="size-3.5" />
       </button>
-    </div>
-  )
-}
-
-function TypingIndicatorRow(): React.JSX.Element {
-  return (
-    <div
-      className="flex items-center justify-start"
-      aria-label={translate('components.native-chat.status.responding', 'Agent is responding')}
-      aria-live="polite"
-    >
-      <div className="flex h-8 items-center gap-1.5 text-muted-foreground">
-        {[0, 1, 2].map((i) => (
-          <span
-            key={i}
-            className="size-1.5 animate-bounce rounded-full bg-muted-foreground/70"
-            // Stagger the three dots so they ripple rather than pulse in unison.
-            style={{ animationDelay: `${i * 160}ms` }}
-          />
-        ))}
-      </div>
     </div>
   )
 }
@@ -284,6 +264,7 @@ export function NativeChatMessageList({
   fontScale,
   onLinkClick,
   allowFileUriLinks = false,
+  workingStartedAt,
   failedDeliveryMessageIds
 }: {
   session: NativeChatLiveSession
@@ -292,6 +273,7 @@ export function NativeChatMessageList({
   expandSignal: boolean
   /** Chat-only text multiplier (1 = default), driven by the zoom shortcuts. */
   fontScale: number
+  workingStartedAt?: number | null
   onLinkClick?: CommentMarkdownLinkClickHandler
   allowFileUriLinks?: boolean
   failedDeliveryMessageIds?: ReadonlySet<string>
@@ -315,6 +297,16 @@ export function NativeChatMessageList({
     [session.messages]
   )
   const showTypingIndicator = shouldShowNativeChatTypingIndicator({ messages, isWorking })
+  const fallbackWorkingStartedAtRef = useRef<number | null>(null)
+  useEffect(() => {
+    fallbackWorkingStartedAtRef.current = isWorking
+      ? (fallbackWorkingStartedAtRef.current ?? Date.now())
+      : null
+  }, [isWorking])
+  const activeWorkingStartedAt = workingStartedAt ?? fallbackWorkingStartedAtRef.current
+  const hasToolActivity = messages.some((message) =>
+    message.blocks.some((block) => block.type === 'tool-call' || block.type === 'tool-result')
+  )
 
   // When an older page prepends, the scroll content grows above the viewport.
   // Capture the pre-render scroll height so the layout effect can restore the
@@ -424,6 +416,12 @@ export function NativeChatMessageList({
           // the desktop analog of the mobile pinch-zoom (Chromium/Electron only).
           style={{ zoom: fontScale }}
         >
+          {showTypingIndicator ? (
+            <NativeChatWorkingStatus
+              startedAt={activeWorkingStartedAt}
+              thinking={!hasToolActivity}
+            />
+          ) : null}
           {hasMore ? (
             <div className="flex justify-center py-1">
               <button
@@ -457,7 +455,6 @@ export function NativeChatMessageList({
               deliveryFailed={failedDeliveryMessageIds?.has(message.id) === true}
             />
           ))}
-          {showTypingIndicator ? <TypingIndicatorRow /> : null}
         </div>
       </div>
       {showJump ? (

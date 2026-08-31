@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Check, ChevronRight, CircleAlert, Loader2 } from 'lucide-react'
+import { Check, ChevronRight, CircleAlert, SquareTerminal, Wrench } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { translate } from '@/i18n/i18n'
 import {
@@ -54,51 +54,6 @@ function activeToolLabel(call: Extract<NativeChatBlock, { type: 'tool-call' }>):
       )
     : translate('components.native-chat.tool.runningNamed', 'Running {{toolName}}', {
         toolName: call.name
-      })
-}
-
-function activeToolSummary(
-  calls: Extract<NativeChatBlock, { type: 'tool-call' }>[]
-): string | null {
-  if (calls.length < 2) {
-    return null
-  }
-  const commandCount = calls.filter((call) =>
-    COMMAND_TOOL_NAMES.has(normalizedToolName(call.name))
-  ).length
-  const toolCount = new Set(calls.map((call) => normalizedToolName(call.name))).size
-  if (commandCount > 0) {
-    if (commandCount === 1 && toolCount === 1) {
-      return translate(
-        'components.native-chat.tool.ranCommandOneToolSummary',
-        'Ran {{commandCount}} command and used {{toolCount}} tool',
-        { commandCount, toolCount }
-      )
-    }
-    if (commandCount === 1) {
-      return translate(
-        'components.native-chat.tool.ranCommandManyToolsSummary',
-        'Ran {{commandCount}} command and used {{toolCount}} tools',
-        { commandCount, toolCount }
-      )
-    }
-    if (toolCount === 1) {
-      return translate(
-        'components.native-chat.tool.ranCommandsOneToolSummary',
-        'Ran {{commandCount}} commands and used {{toolCount}} tool',
-        { commandCount, toolCount }
-      )
-    }
-    return translate(
-      'components.native-chat.tool.ranCommandsManyToolsSummary',
-      'Ran {{commandCount}} commands and used {{toolCount}} tools',
-      { commandCount, toolCount }
-    )
-  }
-  return calls.length === 1
-    ? translate('components.native-chat.tool.usedOneSummary', 'Used 1 tool')
-    : translate('components.native-chat.tool.usedManySummary', 'Used {{toolCount}} tools', {
-        toolCount: calls.length
       })
 }
 
@@ -157,8 +112,7 @@ function ToolLine({ block }: { block: NativeChatBlock }): React.JSX.Element | nu
           </span>
         ) : null}
         {hasDetail ? (
-          // Chevron sits on the right; hidden until hover when collapsed, always
-          // shown (pointing down) when expanded — mirrors Codex's disclosure affordance.
+          // Chevron stays hidden until this row is expanded.
           <ChevronRight
             className={cn(
               'size-3.5 shrink-0 text-muted-foreground transition-all',
@@ -216,7 +170,10 @@ export function NativeChatToolRun({
     (call) => call.state === 'running' && activeTurnIsWorking !== false
   )
   const latestActiveCall = activeCalls.at(-1)
-  const activeSummary = activeToolSummary(calls)
+  const ActiveToolIcon =
+    latestActiveCall && COMMAND_TOOL_NAMES.has(normalizedToolName(latestActiveCall.name))
+      ? SquareTerminal
+      : Wrench
   const hasFailure =
     calls.some((call) => call.state === 'failed') ||
     (activeTurnIsWorking === false && calls.some((call) => call.state === 'running')) ||
@@ -233,36 +190,26 @@ export function NativeChatToolRun({
     // so the turn's activity doesn't crowd the message text.
     <div className="mt-3">
       {latestActiveCall ? (
-        <>
-          {activeSummary ? (
-            <div className="flex min-h-6 items-center gap-1.5 py-0.5 text-sm leading-relaxed text-muted-foreground">
-              <span className="flex size-6 shrink-0 items-center justify-center text-icon-muted">
-                <Check className="size-4 opacity-70" />
-              </span>
-              <span className="truncate">{activeSummary}</span>
-            </div>
-          ) : null}
-          <button
-            type="button"
-            onClick={() => setOpen((v) => !v)}
-            className="group flex min-h-6 w-full items-center gap-1.5 rounded-md py-0.5 text-left text-sm leading-relaxed text-muted-foreground hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
-            aria-expanded={open}
-            aria-live="polite"
-          >
-            <span className="flex size-6 shrink-0 items-center justify-center text-[var(--ai-action-accent)]">
-              <Loader2 className="size-4 animate-spin" />
-            </span>
-            <span className="min-w-0 flex-1 truncate text-foreground/85">
-              {activeToolLabel(latestActiveCall)}
-            </span>
-            {open ? <ChevronRight className="size-3.5 rotate-90 text-muted-foreground" /> : null}
-          </button>
-        </>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="group flex min-h-6 w-full items-center gap-1.5 rounded-md py-0.5 text-left text-sm leading-relaxed text-muted-foreground hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+          aria-expanded={open}
+          aria-live="polite"
+        >
+          <span className="flex size-6 shrink-0 items-center justify-center text-muted-foreground">
+            <ActiveToolIcon className="size-4" />
+          </span>
+          <span className="min-w-0 flex-1 truncate text-foreground/85">
+            {activeToolLabel(latestActiveCall)}
+          </span>
+          {open ? <ChevronRight className="size-3.5 rotate-90 text-muted-foreground" /> : null}
+        </button>
       ) : (
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
-          className="group flex w-full items-center gap-1.5 py-0.5 text-left"
+          className="group flex min-h-6 w-full items-center gap-1.5 py-0.5 text-left"
           aria-expanded={open}
         >
           <span className="flex size-6 shrink-0 items-center justify-center text-muted-foreground">

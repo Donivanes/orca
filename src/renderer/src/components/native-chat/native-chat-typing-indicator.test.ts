@@ -28,25 +28,25 @@ describe('shouldShowNativeChatTypingIndicator', () => {
     ).toBe(true)
   })
 
-  it('hides as soon as the structured reply row arrives, before working clears', () => {
+  it('stays visible when the structured reply row arrives before working clears', () => {
     expect(
       shouldShowNativeChatTypingIndicator({
         messages: [message('u1', 'user'), message('orca-item', 'assistant')],
         isWorking: true
       })
-    ).toBe(false)
+    ).toBe(true)
   })
 
-  it('hides behind the PTY streaming bubble', () => {
+  it('stays visible behind the PTY streaming bubble', () => {
     expect(
       shouldShowNativeChatTypingIndicator({
         messages: [message('u1', 'user'), message(NATIVE_CHAT_STREAMING_ID, 'assistant')],
         isWorking: true
       })
-    ).toBe(false)
+    ).toBe(true)
   })
 
-  it('does not flicker back on when a system row interleaves mid-turn', () => {
+  it('stays visible when a system row interleaves mid-turn', () => {
     expect(
       shouldShowNativeChatTypingIndicator({
         messages: [
@@ -56,7 +56,7 @@ describe('shouldShowNativeChatTypingIndicator', () => {
         ],
         isWorking: true
       })
-    ).toBe(false)
+    ).toBe(true)
   })
 
   it('shows again for the next send even though an earlier turn replied', () => {
@@ -136,17 +136,15 @@ describe('with rows projected from the structured journal', () => {
     } as AgentJournalRenderItem
   }
 
-  it('defers to the structured live tool row while a running command is newest', () => {
-    // The structured renderer owns a visible active tool row, so generic dots
-    // would duplicate the same progress signal underneath it.
+  it('stays visible beside the structured live tool row while a command runs', () => {
     const messages = projectStructuredItemsToNativeChat([assistantTextItem(1), toolCallItem(2)])
     expect(messages.at(-1)?.role).toBe('assistant')
-    expect(shouldShowNativeChatTypingIndicator({ messages, isWorking: true })).toBe(false)
+    expect(shouldShowNativeChatTypingIndicator({ messages, isWorking: true })).toBe(true)
   })
 
-  it('still hides once prose is the newest row', () => {
+  it('stays visible once prose is the newest row', () => {
     const messages = projectStructuredItemsToNativeChat([toolCallItem(1), assistantTextItem(2)])
-    expect(shouldShowNativeChatTypingIndicator({ messages, isWorking: true })).toBe(false)
+    expect(shouldShowNativeChatTypingIndicator({ messages, isWorking: true })).toBe(true)
   })
 
   it('stays hidden when the turn is not working, command row or not', () => {

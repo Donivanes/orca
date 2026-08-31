@@ -16595,7 +16595,10 @@
         "byteLength": "{{value0}} bytes"
       },
       "status": {
-        "responding": "Agent is responding"
+        "responding": "Agent is responding",
+        "working": "Working…",
+        "thinking": "Thinking",
+        "workingFor": "Working for {{value0}} seconds"
       },
       "jumpToLatest": "Jump to latest",
       "toggle": {

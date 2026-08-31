@@ -83,4 +83,52 @@ describe('NativeChatMessageList assistant messages', () => {
     expect(screen.queryByText('1×')).toBeNull()
     expect(document.querySelector('.text-destructive')).toBeNull()
   })
+
+  it('shows a stable thinking status above the transcript', () => {
+    const { container } = render(
+      <NativeChatMessageList
+        session={{ ...session, status: 'working', messages: [] }}
+        isWorking
+        expandSignal={false}
+        fontScale={1}
+      />
+    )
+
+    expect(screen.getByText('Thinking')).toBeInTheDocument()
+    expect(screen.getByText('Thinking')).toHaveClass('border-b')
+    expect(container.querySelector('.animate-bounce')).toBeNull()
+  })
+
+  it('shows elapsed working time once tool activity starts', () => {
+    render(
+      <NativeChatMessageList
+        session={{
+          ...session,
+          status: 'working',
+          messages: [
+            {
+              id: 'tool-1',
+              role: 'assistant',
+              blocks: [
+                {
+                  type: 'tool-call',
+                  name: 'shell',
+                  input: { command: 'sleep 5' },
+                  state: 'running'
+                }
+              ],
+              timestamp: 1,
+              source: 'transcript'
+            }
+          ]
+        }}
+        isWorking
+        workingStartedAt={Date.now() - 3000}
+        expandSignal={false}
+        fontScale={1}
+      />
+    )
+
+    expect(screen.getByText('Working for 3 seconds')).toBeInTheDocument()
+  })
 })

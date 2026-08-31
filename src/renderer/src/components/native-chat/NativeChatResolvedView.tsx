@@ -359,6 +359,7 @@ export function NativeChatResolvedView({
             isWorking={isWorking}
             expandSignal={false}
             fontScale={fontScale.scale}
+            workingStartedAt={hookWorkingEpoch}
             onLinkClick={nativeChatFileLinkClick}
             allowFileUriLinks={fileLinkContext !== null}
             failedDeliveryMessageIds={failedLaunchPromptMessageIds}

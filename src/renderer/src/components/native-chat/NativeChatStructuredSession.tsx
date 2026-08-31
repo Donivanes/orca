@@ -141,6 +141,7 @@ export function NativeChatStructuredSession(props: {
             isWorking={controller.isWorking}
             expandSignal={false}
             fontScale={fontScale.scale}
+            workingStartedAt={null}
             onLinkClick={fileLinkClick}
             allowFileUriLinks={fileLinkClick !== undefined}
           />

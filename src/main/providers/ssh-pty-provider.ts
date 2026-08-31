@@ -245,7 +245,9 @@ export class SshPtyProvider implements IPtyProvider {
       },
       relayTimeoutOptions(opts.deadlineMs)
     )
-    this.livePtyIds.delete(id)
+    if (result?.fenceUnavailable !== true) {
+      this.livePtyIds.delete(id)
+    }
     return result as PtyShutdownResult | void
   }
 

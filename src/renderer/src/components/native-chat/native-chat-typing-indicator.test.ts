@@ -68,6 +68,24 @@ describe('shouldShowNativeChatTypingIndicator', () => {
     ).toBe(true)
   })
 
+  it('does not let an unresolved tool from an earlier turn hide the next send indicator', () => {
+    const earlierRunningTool: NativeChatMessage = {
+      id: 'tool-old',
+      role: 'assistant',
+      blocks: [
+        { type: 'tool-call', name: 'shell', input: { command: 'sleep 1' }, state: 'running' }
+      ],
+      timestamp: null,
+      source: 'transcript'
+    }
+    expect(
+      shouldShowNativeChatTypingIndicator({
+        messages: [earlierRunningTool, message('a1', 'assistant'), message('u2', 'user')],
+        isWorking: true
+      })
+    ).toBe(true)
+  })
+
   it('shows after a slash-command marker even though an earlier turn replied', () => {
     expect(
       shouldShowNativeChatTypingIndicator({

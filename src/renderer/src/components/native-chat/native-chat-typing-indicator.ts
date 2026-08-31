@@ -36,11 +36,6 @@ export function shouldShowNativeChatTypingIndicator(args: {
     return false
   }
   const { messages } = args
-  // The structured app-server path renders its own live tool row. Avoid adding
-  // a second generic dots row beneath it while the latest tool is running.
-  if (messages.some(hasStructuredRunningTool)) {
-    return false
-  }
   // Scan back only to the turn boundary: an assistant row from an EARLIER turn
   // must not suppress the indicator for the send the user just made.
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -49,8 +44,13 @@ export function shouldShowNativeChatTypingIndicator(args: {
       return true
     }
     // Tool work is the strongest reason to KEEP the dots, so it decides here
-    // rather than falling through to the assistant-role check below.
+    // rather than falling through to the assistant-role check below. The
+    // structured renderer owns a live tool row, but only for this turn; older
+    // unresolved rows must not suppress the indicator for a newer send.
     if (isToolActivityOnlyRow(message)) {
+      if (hasStructuredRunningTool(message)) {
+        return false
+      }
       return true
     }
     // Status/system rows interleave mid-turn; they neither suppress nor unsuppress,

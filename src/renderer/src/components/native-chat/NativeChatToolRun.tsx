@@ -38,22 +38,22 @@ function activeToolLabel(call: Extract<NativeChatBlock, { type: 'tool-call' }>):
   const preview = createToolInputDisplay(call.input).label
   if (COMMAND_TOOL_NAMES.has(normalizedToolName(call.name))) {
     return preview
-      ? translate('components.native-chat.tool.runningPreview', 'Running {{value0}}', {
-          value0: preview
+      ? translate('components.native-chat.tool.runningPreview', 'Running {{preview}}', {
+          preview
         })
       : translate('components.native-chat.tool.runningCommand', 'Running command')
   }
   return preview
     ? translate(
         'components.native-chat.tool.runningNamedPreview',
-        'Running {{value0}} {{value1}}',
+        'Running {{toolName}} {{preview}}',
         {
-          value0: call.name,
-          value1: preview
+          toolName: call.name,
+          preview
         }
       )
-    : translate('components.native-chat.tool.runningNamed', 'Running {{value0}}', {
-        value0: call.name
+    : translate('components.native-chat.tool.runningNamed', 'Running {{toolName}}', {
+        toolName: call.name
       })
 }
 
@@ -71,34 +71,34 @@ function activeToolSummary(
     if (commandCount === 1 && toolCount === 1) {
       return translate(
         'components.native-chat.tool.ranCommandOneToolSummary',
-        'Ran {{value0}} command and used {{value1}} tool',
-        { value0: commandCount, value1: toolCount }
+        'Ran {{commandCount}} command and used {{toolCount}} tool',
+        { commandCount, toolCount }
       )
     }
     if (commandCount === 1) {
       return translate(
         'components.native-chat.tool.ranCommandManyToolsSummary',
-        'Ran {{value0}} command and used {{value1}} tools',
-        { value0: commandCount, value1: toolCount }
+        'Ran {{commandCount}} command and used {{toolCount}} tools',
+        { commandCount, toolCount }
       )
     }
     if (toolCount === 1) {
       return translate(
         'components.native-chat.tool.ranCommandsOneToolSummary',
-        'Ran {{value0}} commands and used {{value1}} tool',
-        { value0: commandCount, value1: toolCount }
+        'Ran {{commandCount}} commands and used {{toolCount}} tool',
+        { commandCount, toolCount }
       )
     }
     return translate(
       'components.native-chat.tool.ranCommandsManyToolsSummary',
-      'Ran {{value0}} commands and used {{value1}} tools',
-      { value0: commandCount, value1: toolCount }
+      'Ran {{commandCount}} commands and used {{toolCount}} tools',
+      { commandCount, toolCount }
     )
   }
   return calls.length === 1
     ? translate('components.native-chat.tool.usedOneSummary', 'Used 1 tool')
-    : translate('components.native-chat.tool.usedManySummary', 'Used {{value0}} tools', {
-        value0: calls.length
+    : translate('components.native-chat.tool.usedManySummary', 'Used {{toolCount}} tools', {
+        toolCount: calls.length
       })
 }
 

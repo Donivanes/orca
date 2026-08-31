@@ -99,8 +99,8 @@ function selectReplayTargets(
  *
  *  Re-checks the fence here rather than trusting the selection pass, so the identity proof and the
  *  irreversible call sit next to each other and cannot drift apart if this loop is ever reshaped.
- *  It still cannot be made atomic — `pty.shutdown` carries no incarnation, so only the host could
- *  refuse a stale kill. See the residual risk note in the PR. */
+ *  The recorded incarnation is forwarded to the relay so its host-side fence can refuse a stale
+ *  replay instead of killing a replacement that recycled the relay id. */
 async function deliverReplay(
   args: SshPendingPtyKillReplayArgs,
   entry: SshPendingPtyKillEntry,
@@ -114,7 +114,10 @@ async function deliverReplay(
   }
   args.store.noteSshRemotePtyKillReplayAttempt(args.targetId, entry.ptyId)
   try {
-    await args.provider.shutdown(toAppSshPtyId(args.targetId, entry.ptyId), { immediate: true })
+    await args.provider.shutdown(toAppSshPtyId(args.targetId, entry.ptyId), {
+      immediate: true,
+      incarnationId: entry.intent.incarnationId
+    })
     return true
   } catch (err) {
     console.warn(

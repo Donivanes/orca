@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ChevronRight } from 'lucide-react'
+import { Check, ChevronRight, CircleAlert, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { translate } from '@/i18n/i18n'
 import {
@@ -15,6 +15,92 @@ import {
   truncateToolDetail
 } from './native-chat-tool-summary'
 import { NativeChatDiffView } from './NativeChatDiffView'
+
+const COMMAND_TOOL_NAMES = new Set([
+  'bash',
+  'shell',
+  'powershell',
+  'terminal',
+  'execute',
+  'run_command',
+  'run_shell_command',
+  'shell_command',
+  'exec_command',
+  'run_terminal_cmd',
+  'run_terminal_command'
+])
+
+function normalizedToolName(name: string): string {
+  return name.trim().toLowerCase()
+}
+
+function activeToolLabel(call: Extract<NativeChatBlock, { type: 'tool-call' }>): string {
+  const preview = createToolInputDisplay(call.input).label
+  if (COMMAND_TOOL_NAMES.has(normalizedToolName(call.name))) {
+    return preview
+      ? translate('components.native-chat.tool.runningPreview', 'Running {{value0}}', {
+          value0: preview
+        })
+      : translate('components.native-chat.tool.runningCommand', 'Running command')
+  }
+  return preview
+    ? translate(
+        'components.native-chat.tool.runningNamedPreview',
+        'Running {{value0}} {{value1}}',
+        {
+          value0: call.name,
+          value1: preview
+        }
+      )
+    : translate('components.native-chat.tool.runningNamed', 'Running {{value0}}', {
+        value0: call.name
+      })
+}
+
+function activeToolSummary(
+  calls: Extract<NativeChatBlock, { type: 'tool-call' }>[]
+): string | null {
+  if (calls.length < 2) {
+    return null
+  }
+  const commandCount = calls.filter((call) =>
+    COMMAND_TOOL_NAMES.has(normalizedToolName(call.name))
+  ).length
+  const toolCount = new Set(calls.map((call) => normalizedToolName(call.name))).size
+  if (commandCount > 0) {
+    if (commandCount === 1 && toolCount === 1) {
+      return translate(
+        'components.native-chat.tool.ranCommandOneToolSummary',
+        'Ran {{value0}} command and used {{value1}} tool',
+        { value0: commandCount, value1: toolCount }
+      )
+    }
+    if (commandCount === 1) {
+      return translate(
+        'components.native-chat.tool.ranCommandManyToolsSummary',
+        'Ran {{value0}} command and used {{value1}} tools',
+        { value0: commandCount, value1: toolCount }
+      )
+    }
+    if (toolCount === 1) {
+      return translate(
+        'components.native-chat.tool.ranCommandsOneToolSummary',
+        'Ran {{value0}} commands and used {{value1}} tool',
+        { value0: commandCount, value1: toolCount }
+      )
+    }
+    return translate(
+      'components.native-chat.tool.ranCommandsManyToolsSummary',
+      'Ran {{value0}} commands and used {{value1}} tools',
+      { value0: commandCount, value1: toolCount }
+    )
+  }
+  return calls.length === 1
+    ? translate('components.native-chat.tool.usedOneSummary', 'Used 1 tool')
+    : translate('components.native-chat.tool.usedManySummary', 'Used {{value0}} tools', {
+        value0: calls.length
+      })
+}
 
 /** A single inline tool line — `▸ ToolName  preview` — that expands in place to
  *  show the call's diff/input or the result's body. Tool calls read as flat
@@ -122,6 +208,13 @@ export function NativeChatToolRun({
 
   const callCount = countToolCalls(blocks) || blocks.length
   const summary = summarizeToolRun(blocks)
+  const calls = blocks.filter(isToolCallBlock)
+  const activeCalls = calls.filter((call) => call.state === 'running')
+  const latestActiveCall = activeCalls.at(-1)
+  const activeSummary = activeToolSummary(calls)
+  const hasFailure =
+    calls.some((call) => call.state === 'failed') ||
+    blocks.some((block) => isToolResultBlock(block) && block.isError)
   const fallbackLabel =
     callCount === 1
       ? translate('components.native-chat.tool.countOne', '1 tool call')
@@ -133,26 +226,61 @@ export function NativeChatToolRun({
     // Extra top margin sets the tool run apart from the assistant prose above it
     // so the turn's activity doesn't crowd the message text.
     <div className="mt-3">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="group flex w-full items-center gap-1.5 py-0.5 text-left"
-      >
-        <span className="shrink-0 font-mono text-[11px] font-bold text-muted-foreground transition-colors group-hover:text-foreground/80">
-          {callCount}×
-        </span>
-        <span className="min-w-0 truncate font-mono text-[11px] text-muted-foreground transition-colors group-hover:text-foreground/80">
-          {summary || fallbackLabel}
-        </span>
-        {/* Chevron on the right, revealed on hover when collapsed and pointing
-            down when open — matches Codex's tool-run disclosure. */}
-        <ChevronRight
-          className={cn(
-            'size-3.5 shrink-0 text-muted-foreground transition-all',
-            open ? 'rotate-90 opacity-100' : 'opacity-0 group-hover:opacity-100'
-          )}
-        />
-      </button>
+      {latestActiveCall ? (
+        <>
+          {activeSummary ? (
+            <div className="flex min-h-6 items-center gap-1.5 py-0.5 text-sm leading-relaxed text-muted-foreground">
+              <span className="flex size-6 shrink-0 items-center justify-center text-icon-muted">
+                <Check className="size-4 opacity-70" />
+              </span>
+              <span className="truncate">{activeSummary}</span>
+            </div>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            className="group flex min-h-6 w-full items-center gap-1.5 rounded-md py-0.5 text-left text-sm leading-relaxed text-muted-foreground hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+            aria-expanded={open}
+            aria-live="polite"
+          >
+            <span className="flex size-6 shrink-0 items-center justify-center text-[var(--ai-action-accent)]">
+              <Loader2 className="size-4 animate-spin" />
+            </span>
+            <span className="min-w-0 flex-1 truncate text-foreground/85">
+              {activeToolLabel(latestActiveCall)}
+            </span>
+            {open ? <ChevronRight className="size-3.5 rotate-90 text-muted-foreground" /> : null}
+          </button>
+        </>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="group flex w-full items-center gap-1.5 py-0.5 text-left"
+          aria-expanded={open}
+        >
+          <span className="flex size-6 shrink-0 items-center justify-center text-muted-foreground">
+            {hasFailure ? (
+              <CircleAlert className="size-3.5 text-destructive" />
+            ) : (
+              <Check className="size-3.5" />
+            )}
+          </span>
+          <span className="shrink-0 font-mono text-[11px] font-bold text-muted-foreground transition-colors group-hover:text-foreground/80">
+            {callCount}×
+          </span>
+          <span className="min-w-0 truncate font-mono text-[11px] text-muted-foreground transition-colors group-hover:text-foreground/80">
+            {summary || fallbackLabel}
+          </span>
+          {/* Chevron is revealed on hover when collapsed and points down when open. */}
+          <ChevronRight
+            className={cn(
+              'size-3.5 shrink-0 text-muted-foreground transition-all',
+              open ? 'rotate-90 opacity-100' : 'opacity-0 group-hover:opacity-100'
+            )}
+          />
+        </button>
+      )}
       {open ? (
         <div className="mt-1">
           {blocks.map((block, i) => (

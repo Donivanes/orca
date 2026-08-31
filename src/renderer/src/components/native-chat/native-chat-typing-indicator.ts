@@ -24,6 +24,10 @@ function isToolActivityOnlyRow(message: NativeChatMessage): boolean {
   return blocks.every((block) => block.type === 'tool-call' || block.type === 'tool-result')
 }
 
+function hasStructuredRunningTool(message: NativeChatMessage): boolean {
+  return message.blocks.some((block) => block.type === 'tool-call' && block.state === 'running')
+}
+
 export function shouldShowNativeChatTypingIndicator(args: {
   messages: readonly NativeChatMessage[]
   isWorking: boolean
@@ -32,6 +36,11 @@ export function shouldShowNativeChatTypingIndicator(args: {
     return false
   }
   const { messages } = args
+  // The structured app-server path renders its own live tool row. Avoid adding
+  // a second generic dots row beneath it while the latest tool is running.
+  if (messages.some(hasStructuredRunningTool)) {
+    return false
+  }
   // Scan back only to the turn boundary: an assistant row from an EARLIER turn
   // must not suppress the indicator for the send the user just made.
   for (let index = messages.length - 1; index >= 0; index -= 1) {

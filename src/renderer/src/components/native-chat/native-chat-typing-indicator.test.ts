@@ -118,12 +118,12 @@ describe('with rows projected from the structured journal', () => {
     } as AgentJournalRenderItem
   }
 
-  it('keeps showing while a running command is the newest row', () => {
-    // The screenshot case: prose landed, then codex started running shell commands
-    // and the chat body went still for the length of the command.
+  it('defers to the structured live tool row while a running command is newest', () => {
+    // The structured renderer owns a visible active tool row, so generic dots
+    // would duplicate the same progress signal underneath it.
     const messages = projectStructuredItemsToNativeChat([assistantTextItem(1), toolCallItem(2)])
     expect(messages.at(-1)?.role).toBe('assistant')
-    expect(shouldShowNativeChatTypingIndicator({ messages, isWorking: true })).toBe(true)
+    expect(shouldShowNativeChatTypingIndicator({ messages, isWorking: true })).toBe(false)
   })
 
   it('still hides once prose is the newest row', () => {
